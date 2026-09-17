@@ -75,7 +75,7 @@ def save_result(dataset, task_data, clarity, feasibility, safety, comments, anno
         gc = gspread.service_account_from_dict(credentials_dict)
 
         # 2. Open the specific Google Sheet
-        SHEET_URL = "https://docs.google.com/spreadsheets/d/1ZYnGCNIjOVoZqGv7TOZwkKV-k2z25J6g8UkS7dfWY-M/edit"
+        SHEET_URL = st.secrets["SHEET_URL"]
         sh = gc.open_by_url(SHEET_URL)
 
         # 3. Select the first tab (Sheet1)
