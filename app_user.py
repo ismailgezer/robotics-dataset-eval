@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-from streamlit_gsheets import GSheetsConnection
 import gspread
 
 # --- Page Configuration ---
