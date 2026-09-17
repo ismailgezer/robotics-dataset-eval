@@ -98,9 +98,9 @@ sample_size = st.sidebar.number_input("Tasks to evaluate per dataset:", min_valu
 
 # Only allow them to load datasets if they provided an ID
 if st.sidebar.button("Start Evaluation", disabled=not annotator_id):
-    st.session_state.sampled_data['SaGC'] = load_and_sample_data("dataset/augment.json", 'json', sample_size)
-    st.session_state.sampled_data['AmbiK'] = load_and_sample_data("dataset/ambik_test_900.csv", 'csv', sample_size)
-    st.session_state.sampled_data['SafeAgentBench'] = load_and_sample_data("dataset/mixed_detailed_1009.jsonl", 'jsonl', sample_size)
+    st.session_state.sampled_data['SaGC'] = load_and_sample_data("augment.json", 'json', sample_size)
+    st.session_state.sampled_data['AmbiK'] = load_and_sample_data("ambik_test_900.csv", 'csv', sample_size)
+    st.session_state.sampled_data['SafeAgentBench'] = load_and_sample_data("mixed_detailed_1009.jsonl", 'jsonl', sample_size)
 
     st.session_state.current_idx = {'SaGC': 0, 'AmbiK': 0, 'SafeAgentBench': 0}
 
