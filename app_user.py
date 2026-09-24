@@ -186,10 +186,30 @@ else:
             scene_name = task.get('scene_name', 'N/A')
             st.write(f"**Scene Name:** {scene_name}")
             
-            # Merge logic for involved objects
-            inv_objs = task.get('objects') or task.get('involved_objects') or []
+            # --- Robust Object Extraction ---
+            inv_objs = set()
             
-            # Load Workspace Context
+            # 1. Check 'objects' list
+            if isinstance(task.get('objects'), list):
+                inv_objs.update(task.get('objects'))
+            # 2. Check 'involved_objects' list
+            if isinstance(task.get('involved_objects'), list):
+                inv_objs.update(task.get('involved_objects'))
+            # 3. Check 'final_state' for objectTypes
+            final_state = task.get('final_state')
+            if isinstance(final_state, list):
+                for fs in final_state:
+                    if isinstance(fs, dict) and 'objectType' in fs:
+                        inv_objs.add(fs['objectType'])
+            # 4. Fallback: Parse the 'step' array for words after 'find'
+            if not inv_objs and isinstance(task.get('step'), list):
+                for s in task.get('step'):
+                    if str(s).lower().startswith('find '):
+                        inv_objs.add(str(s)[5:].strip())
+            
+            inv_objs = list(inv_objs)
+            
+            # --- Load Workspace Context ---
             workspace_desc = "Description not found."
             if scene_name != 'N/A':
                 try:
@@ -199,14 +219,17 @@ else:
                 except FileNotFoundError:
                     st.error("Missing 'thor_workspaces.json'.")
             
-            # Object Presence Checker (Smart UI)
-            if isinstance(inv_objs, list) and len(inv_objs) > 0:
+            # --- Object Presence Checker ---
+            if inv_objs:
                 st.write("**Object Presence Check:**")
                 for obj in inv_objs:
+                    # Using case-insensitive check
                     if str(obj).lower() in workspace_desc.lower():
                         st.markdown(f"- ✅ **{obj}** is present in the scene.")
                     else:
                         st.markdown(f"- ❌ **{obj}** was NOT found in the scene.")
+            else:
+                st.write("**Object Presence Check:** No distinct objects identified.")
             
             with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
                 st.code(workspace_desc, language="text")
@@ -222,9 +245,18 @@ else:
             st.success(f"**Instruction:** {task.get('ambiguous_task') or task.get('unambiguous_direct') or 'N/A'}")
             
         elif dataset_choice == "SafeAgentBench":
-            # Handles merged safe/unsafe detailed differences
-            command = task.get('risk_instruction') or task.get('instruction') or "N/A"
-            st.success(f"**Instruction:** {command}")
+            # --- Robust Instruction Extraction ---
+            instr = task.get('instruction')
+            risk_instr = task.get('risk_instruction')
+            
+            # Render both if they exist so nothing is accidentally hidden
+            if instr:
+                st.success(f"**Instruction:** {instr}")
+            if risk_instr:
+                st.warning(f"**Risk Instruction:** {risk_instr}")
+                
+            if not instr and not risk_instr:
+                st.error("No instruction found for this task.")
 
     st.divider()
 
