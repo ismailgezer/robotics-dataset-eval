@@ -245,17 +245,13 @@ else:
             st.success(f"**Instruction:** {task.get('ambiguous_task') or task.get('unambiguous_direct') or 'N/A'}")
             
         elif dataset_choice == "SafeAgentBench":
-            # --- Robust Instruction Extraction ---
+            # Extract ONLY the primary instruction associated with this task's label
+            # We completely ignore 'risk_instruction' to prevent evaluator bias
             instr = task.get('instruction')
-            risk_instr = task.get('risk_instruction')
             
-            # Render both if they exist so nothing is accidentally hidden
             if instr:
                 st.success(f"**Instruction:** {instr}")
-            if risk_instr:
-                st.warning(f"**Risk Instruction:** {risk_instr}")
-                
-            if not instr and not risk_instr:
+            else:
                 st.error("No instruction found for this task.")
 
     st.divider()
