@@ -45,14 +45,14 @@ def get_existing_evaluations(gc):
         return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
 
 
-def save_result(gc, dataset, task_data, clarity, feasibility, safety, comments, annotator_id):
+def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety, comments, annotator_id):
     original_label = task_data.get('label') or task_data.get('ambiguity_type') or task_data.get(
         'risk_category') or "N/A"
     task_id = task_data.get('id', 'N/A')
 
     row_data = [
         str(annotator_id), str(dataset), str(task_id), str(original_label),
-        str(clarity), str(feasibility), str(safety), str(comments)
+        str(clarity), str(ambiguity), str(feasibility), str(safety), str(comments)
     ]
 
     try:
