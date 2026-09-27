@@ -46,8 +46,13 @@ def get_existing_evaluations(gc):
 
 
 def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety, comments, annotator_id):
-    original_label = task_data.get('label') or task_data.get('ambiguity_type') or task_data.get(
-        'risk_category') or "N/A"
+    original_label = (
+            task_data.get('label') or
+            task_data.get('task') or
+            task_data.get('ambiguity_type') or
+            task_data.get('risk_category') or
+            "N/A"
+    )
     task_id = task_data.get('id', 'N/A')
 
     row_data = [
@@ -67,8 +72,8 @@ def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety,
 
 
 # --- Data Loading & Task Allocation ---
-def load_raw_data(file_path, file_type):
-    """Loads all data from a curated subset file."""
+def load_raw_data(file_path, file_type, dataset_prefix="Task"):
+    """Loads data and ensures every task has a unique ID."""
     try:
         if file_type == 'csv':
             df = pd.read_csv(file_path)
@@ -89,7 +94,15 @@ def load_raw_data(file_path, file_type):
                 return []
         else:
             return []
-        return df.to_dict('records')
+
+        records = df.to_dict('records')
+
+        # Inject deterministic IDs for datasets that don't have them
+        for i, rec in enumerate(records):
+            if 'id' not in rec:
+                rec['id'] = f"{dataset_prefix}_{i}"
+
+        return records
     except Exception:
         return []
 
@@ -135,9 +148,10 @@ if st.sidebar.button("Start / Resume Evaluation", disabled=not annotator_id):
     gc = init_connection()
     existing_df = get_existing_evaluations(gc)
 
-    raw_sagc = load_raw_data(SAGC_SUBSET, 'json')
-    raw_ambik = load_raw_data(AMBIK_SUBSET, 'csv')
-    raw_safe = load_raw_data(SAFE_SUBSET, 'jsonl')
+    # Pass the prefix so the loader can generate IDs (e.g., "AmbiK_1")
+    raw_sagc = load_raw_data(SAGC_SUBSET, 'json', 'SaGC')
+    raw_ambik = load_raw_data(AMBIK_SUBSET, 'csv', 'AmbiK')
+    raw_safe = load_raw_data(SAFE_SUBSET, 'jsonl', 'SafeAgentBench')
 
     st.session_state.sampled_data['SaGC'] = allocate_tasks(raw_sagc, existing_df, "SaGC", annotator_id, sample_size)
     st.session_state.sampled_data['AmbiK'] = allocate_tasks(raw_ambik, existing_df, "AmbiK", annotator_id, sample_size)
@@ -147,8 +161,13 @@ if st.sidebar.button("Start / Resume Evaluation", disabled=not annotator_id):
     st.session_state.current_idx = {'SaGC': 0, 'AmbiK': 0, 'SafeAgentBench': 0}
     st.session_state.annotator_id = annotator_id
 
+    # Check if they are a returning user for a smarter greeting
+    is_returning = not existing_df[existing_df['Annotator_ID'].astype(str) == str(annotator_id)].empty
+    greeting = "Welcome back" if is_returning else "Welcome"
+
     total_tasks = sum(len(v) for v in st.session_state.sampled_data.values())
-    st.sidebar.success(f"Welcome back, {annotator_id}! {total_tasks} new tasks assigned.")
+    st.sidebar.success(
+        f"{greeting}, {annotator_id}! Allocated {total_tasks} total tasks (Max {sample_size} per dataset).")
 
 # --- Main Interface ---
 st.title("Robotics Dataset Ground Truth Reliability Testing")
