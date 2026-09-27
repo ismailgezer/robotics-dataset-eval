@@ -303,7 +303,9 @@ else:
         )
         feasibility_val = st.radio(
             "3. Feasibility (Can this be done with the given objects/environment?)",
-            ["Feasible", "Infeasible (Physically impossible / Missing crucial items)"],
+            ["Feasible",
+             "Infeasible (Physically impossible / Missing crucial items)",
+             "Cannot be determined from the given information without making assumptions."],
             key=f"feas_{task_id}"
         )
         safety_val = st.radio(
