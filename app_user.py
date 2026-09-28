@@ -46,13 +46,16 @@ def get_existing_evaluations(gc):
 
 
 def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety, comments, annotator_id):
-    original_label = (
-            task_data.get('label') or
-            task_data.get('task') or
-            task_data.get('ambiguity_type') or
-            task_data.get('risk_category') or
-            "N/A"
-    )
+    if dataset == "SaGC":
+        label = task_data.get('label')
+        original_label = str(label) if label is not None else "N/A"
+    elif dataset == "AmbiK":
+        original_label = task_data.get('ground_truth', 'N/A')
+    elif dataset == "SafeAgentBench":
+        original_label = task_data.get('ground_truth', 'N/A')
+    else:
+        original_label = "N/A"
+
     task_id = task_data.get('id', 'N/A')
 
     row_data = [
@@ -73,12 +76,34 @@ def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety,
 
 # --- Data Loading & Task Allocation ---
 def load_raw_data(file_path, file_type, dataset_prefix="Task"):
-    """Loads data and ensures every task has a unique ID."""
+    """Loads data, ensures unique IDs, and expands multi-state tasks."""
     try:
         if file_type == 'csv':
             df = pd.read_csv(file_path)
+            records = df.to_dict('records')
+
+            # Expand AmbiK to test both Clear and Ambiguous versions independently
+            expanded_records = []
+            for i, rec in enumerate(records):
+                # 1. Ambiguous Task Variant
+                ambig_task = rec.copy()
+                ambig_task['id'] = f"{dataset_prefix}_{i}_ambiguous"
+                ambig_task['ground_truth'] = "ambiguous"
+                ambig_task['eval_instruction'] = rec.get('Ambiguous Task') or rec.get('ambiguous_task')
+                expanded_records.append(ambig_task)
+
+                # 2. Clear Task Variant
+                clear_task = rec.copy()
+                clear_task['id'] = f"{dataset_prefix}_{i}_clear"
+                clear_task['ground_truth'] = "clear"
+                clear_task['eval_instruction'] = rec.get('Unambiguous Direct') or rec.get('unambiguous_direct')
+                expanded_records.append(clear_task)
+
+            return expanded_records
+
         elif file_type == 'jsonl':
             df = pd.read_json(file_path, lines=True)
+            records = df.to_dict('records')
         elif file_type == 'json':
             with open(file_path, 'r') as f:
                 data = json.load(f)
@@ -87,23 +112,21 @@ def load_raw_data(file_path, file_type, dataset_prefix="Task"):
                 for key, val in data.items():
                     val['id'] = key
                     records.append(val)
-                df = pd.DataFrame(records)
             elif isinstance(data, list):
-                df = pd.DataFrame(data)
+                records = data
             else:
                 return []
         else:
             return []
 
-        records = df.to_dict('records')
-
-        # Inject deterministic IDs for datasets that don't have them
+        # Inject deterministic IDs for datasets that lack them (SafeAgentBench)
         for i, rec in enumerate(records):
             if 'id' not in rec:
                 rec['id'] = f"{dataset_prefix}_{i}"
 
         return records
-    except Exception:
+    except Exception as e:
+        st.error(f"Error loading {dataset_prefix}: {e}")
         return []
 
 
@@ -212,7 +235,7 @@ else:
                 st.write("**People:**", ", ".join(task['scene'].get('people', [])))
 
         elif dataset_choice == "AmbiK":
-            env = task.get('environment_short') or task.get('environment_full') or "N/A"
+            env = task.get('Environment Short') or task.get('environment_short') or "N/A"
             st.write("**Kitchen Items:**", env)
 
         elif dataset_choice == "SafeAgentBench":
@@ -275,13 +298,10 @@ else:
             st.write(f"**Task Category:** {task.get('task', 'N/A')}")
 
         elif dataset_choice == "AmbiK":
-            st.success(f"**Instruction:** {task.get('ambiguous_task') or task.get('unambiguous_direct') or 'N/A'}")
+            st.success(f"**Instruction:** {task.get('eval_instruction', 'N/A')}")
 
         elif dataset_choice == "SafeAgentBench":
-            # Extract ONLY the primary instruction associated with this task's label
-            # We completely ignore 'risk_instruction' to prevent evaluator bias
             instr = task.get('instruction')
-
             if instr:
                 st.success(f"**Instruction:** {instr}")
             else:
