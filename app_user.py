@@ -363,7 +363,7 @@ else:
             key=f"ambig_type_{task_id}"
         )
 
-        ambiguity_type = ", ".join(selected_types) if selected_types else "None Selected"
+        ambiguity_type = ", ".join(selected_types) if selected_types else ""
 
     feasibility_val = st.radio(
         "2. Feasibility (Can this be done with the given objects/environment?)",
