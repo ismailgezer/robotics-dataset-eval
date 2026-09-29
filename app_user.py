@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import json
 import os
@@ -7,13 +8,11 @@ import gspread
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
 
+# Scroll to top mechanism
 if st.session_state.get('scroll_to_top', False):
-    # This tries scrolling both the Streamlit main container and the window itself to cover all browser types
-    scroll_js = "var main=document.querySelector('.main'); if(main){main.scrollTo({top:0, behavior:'smooth'});} window.scrollTo({top:0, behavior:'smooth'});"
-    
-    st.markdown(
-        f'<img src="dummy_image_that_does_not_exist.png" style="display:none;" onerror="{scroll_js}">', 
-        unsafe_allow_html=True
+    st.components.v1.html(
+        "<script>window.parent.document.querySelector('.main').scrollTop = 0;</script>",
+        height=0
     )
     st.session_state.scroll_to_top = False
 
