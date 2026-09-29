@@ -7,27 +7,6 @@ import gspread
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
 
-# 1. Inject an invisible HTML anchor at the absolute top of the app
-st.markdown("<div id='top-of-page'></div>", unsafe_allow_html=True)
-
-# 2. The delayed scroll mechanism
-if st.session_state.get('scroll_to_top', False):
-    st.markdown(
-        """
-        <script>
-            // Wait 150ms for Streamlit's native scroll-preservation to finish, then override it
-            setTimeout(function() {
-                var topElement = document.getElementById('top-of-page') || window.parent.document.getElementById('top-of-page');
-                if (topElement) {
-                    topElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }
-            }, 150);
-        </script>
-        """, 
-        unsafe_allow_html=True
-    )
-    st.session_state.scroll_to_top = False
-
 # Ensure session state variables exist
 if 'sampled_data' not in st.session_state:
     st.session_state.sampled_data = {'SaGC': [], 'AmbiK': [], 'SafeAgentBench': []}
@@ -400,5 +379,4 @@ else:
 
         if success:
             st.session_state.current_idx[dataset_choice] += 1
-            st.session_state.scroll_to_top = True
             st.rerun()
