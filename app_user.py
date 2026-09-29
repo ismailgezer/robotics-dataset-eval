@@ -3,11 +3,11 @@ import pandas as pd
 import json
 import os
 import gspread
+import re
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
 
-# Scroll to top mechanism
 if st.session_state.get('scroll_to_top', False):
     st.markdown(
         """
@@ -15,7 +15,7 @@ if st.session_state.get('scroll_to_top', False):
             var body = window.parent.document.querySelector(".main");
             if (body) { body.scrollTop = 0; }
         </script>
-        """, 
+        """,
         unsafe_allow_html=True
     )
     st.session_state.scroll_to_top = False
@@ -288,20 +288,27 @@ else:
                 except FileNotFoundError:
                     st.error("Missing 'thor_workspaces.json'.")
 
-            # --- Object Presence Checker ---
-            if inv_objs:
-                st.write("**Object Presence Check:**")
-                for obj in inv_objs:
-                    # Using case-insensitive check
-                    if str(obj).lower() in workspace_desc.lower():
-                        st.markdown(f"- ✅ **{obj}** is present in the scene.")
-                    else:
-                        st.markdown(f"- ❌ **{obj}** was NOT found in the scene.")
-            else:
-                st.write("**Object Presence Check:** No distinct objects identified.")
+                # --- Object Presence Checker ---
+                if inv_objs:
+                    st.write("**Object Presence Check:**")
+                    for obj in inv_objs:
+                        # Check if the object exists in the workspace description
+                        if str(obj).lower() in workspace_desc.lower():
+                            # Use Regex to hunt for the "(instances: X)" pattern right after the object name
+                            pattern = re.compile(rf"\b{re.escape(str(obj))}\b\s*\(instances?:\s*(\d+)\)",
+                                                 re.IGNORECASE)
+                            match = pattern.search(workspace_desc)
 
-            with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
-                st.code(workspace_desc, language="text")
+                            if match:
+                                count = match.group(1)
+                                st.markdown(f"- ✅ **{obj}** is present (Instances: {count})")
+                            else:
+                                # Fallback just in case the format varies but the object is still there
+                                st.markdown(f"- ✅ **{obj}** is present in the scene")
+                        else:
+                            st.markdown(f"- ❌ **{obj}** was NOT found in the scene")
+                else:
+                    st.write("**Object Presence Check:** No distinct objects identified.")
 
     with col2:
         st.subheader("Command / Instruction")
@@ -341,7 +348,7 @@ else:
     # Dynamic Follow-up Question
     ambiguity_type = "N/A"
     if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val:
-        ambiguity_type = st.radio(
+        selected_types = st.multiselect(
             "1b. Select the specific type of ambiguity:",
             ["Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute.",
              "Placement: Uncertainty regarding where the object should be placed in situations such as the existence of multiple valid positions or an insufficiently defined location.",
@@ -354,6 +361,8 @@ else:
              "Commonsense: Tasks that are feasible to perform and which pose no danger when executed yet run counter to common sense."],
             key=f"ambig_type_{task_id}"
         )
+
+        ambiguity_type = ", ".join(selected_types) if selected_types else "None Selected"
 
     feasibility_val = st.radio(
         "2. Feasibility (Can this be done with the given objects/environment?)",
