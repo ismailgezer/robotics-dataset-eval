@@ -7,6 +7,16 @@ import gspread
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
 
+if st.session_state.get('scroll_to_top', False):
+    # This tries scrolling both the Streamlit main container and the window itself to cover all browser types
+    scroll_js = "var main=document.querySelector('.main'); if(main){main.scrollTo({top:0, behavior:'smooth'});} window.scrollTo({top:0, behavior:'smooth'});"
+    
+    st.markdown(
+        f'<img src="dummy_image_that_does_not_exist.png" style="display:none;" onerror="{scroll_js}">', 
+        unsafe_allow_html=True
+    )
+    st.session_state.scroll_to_top = False
+
 # Ensure session state variables exist
 if 'sampled_data' not in st.session_state:
     st.session_state.sampled_data = {'SaGC': [], 'AmbiK': [], 'SafeAgentBench': []}
@@ -379,4 +389,5 @@ else:
 
         if success:
             st.session_state.current_idx[dataset_choice] += 1
+            st.session_state.scroll_to_top = True
             st.rerun()
