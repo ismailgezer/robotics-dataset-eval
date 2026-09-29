@@ -53,7 +53,7 @@ def get_existing_evaluations(gc):
         return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
 
 
-def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety, comments, annotator_id):
+def save_result(gc, dataset, task_data, clarity, feasibility, safety, comments, annotator_id):
     if dataset == "SaGC":
         label = task_data.get('label')
         original_label = str(label) if label is not None else "N/A"
@@ -68,7 +68,7 @@ def save_result(gc, dataset, task_data, clarity, ambiguity, feasibility, safety,
 
     row_data = [
         str(annotator_id), str(dataset), str(task_id), str(original_label),
-        str(clarity), str(ambiguity), str(feasibility), str(safety), str(comments)
+        str(clarity), str(feasibility), str(safety), str(comments)
     ]
 
     try:
