@@ -380,7 +380,7 @@ else:
         gc = init_connection()
 
         # Merge the ambiguity type into the clarity string so you don't have to restructure your Google Sheet
-        final_clarity = f"{clarity_val} [{ambiguity_type}]" if "Ambiguous" in clarity_val else clarity_val
+        final_clarity = f"{clarity_val} [{ambiguity_type}]" if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val else clarity_val
 
         success = save_result(
             gc, dataset_choice, task,
