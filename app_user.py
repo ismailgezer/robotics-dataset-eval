@@ -292,9 +292,7 @@ else:
                 if inv_objs:
                     st.write("**Object Presence Check:**")
                     for obj in inv_objs:
-                        # Check if the object exists in the workspace description
                         if str(obj).lower() in workspace_desc.lower():
-                            # Use Regex to hunt for the "(instances: X)" pattern right after the object name
                             pattern = re.compile(rf"\b{re.escape(str(obj))}\b\s*\(instances?:\s*(\d+)\)",
                                                  re.IGNORECASE)
                             match = pattern.search(workspace_desc)
@@ -303,12 +301,15 @@ else:
                                 count = match.group(1)
                                 st.markdown(f"- ✅ **{obj}** is present (Instances: {count})")
                             else:
-                                # Fallback just in case the format varies but the object is still there
                                 st.markdown(f"- ✅ **{obj}** is present in the scene")
                         else:
                             st.markdown(f"- ❌ **{obj}** was NOT found in the scene")
                 else:
                     st.write("**Object Presence Check:** No distinct objects identified.")
+
+                # --- The Restored Expander ---
+                with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
+                    st.code(workspace_desc, language="text")
 
     with col2:
         st.subheader("Command / Instruction")
@@ -390,16 +391,19 @@ else:
     submit_btn = st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary")
 
     if submit_btn:
-        gc = init_connection()
+        if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val and not ambiguity_type:
+            st.error("⚠️ Please select at least one ambiguity type before submitting.")
+        else:
+            gc = init_connection()
 
-        # Pass the separate ambiguity_type variable directly
-        success = save_result(
-            gc, dataset_choice, task,
-            clarity_val, ambiguity_type, feasibility_val, safety_val, comments_val,
-            st.session_state.annotator_id
-        )
+            # Pass the separate ambiguity_type variable directly
+            success = save_result(
+                gc, dataset_choice, task,
+                clarity_val, ambiguity_type, feasibility_val, safety_val, comments_val,
+                st.session_state.annotator_id
+            )
 
-        if success:
-            st.session_state.current_idx[dataset_choice] += 1
-            st.session_state.scroll_to_top = True
-            st.rerun()
+            if success:
+                st.session_state.current_idx[dataset_choice] += 1
+                st.session_state.scroll_to_top = True
+                st.rerun()
