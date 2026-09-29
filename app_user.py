@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import json
 import os
@@ -10,9 +9,14 @@ st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide"
 
 # Scroll to top mechanism
 if st.session_state.get('scroll_to_top', False):
-    st.components.v1.html(
-        "<script>window.parent.document.querySelector('.main').scrollTop = 0;</script>",
-        height=0
+    st.markdown(
+        """
+        <script>
+            var body = window.parent.document.querySelector(".main");
+            if (body) { body.scrollTop = 0; }
+        </script>
+        """, 
+        unsafe_allow_html=True
     )
     st.session_state.scroll_to_top = False
 
