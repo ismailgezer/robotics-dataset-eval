@@ -9,7 +9,7 @@ st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide"
 
 # Scroll to top mechanism
 if st.session_state.get('scroll_to_top', False):
-    st.components.v1.html(
+    st.iframe(
         "<script>window.parent.document.querySelector('.main').scrollTop = 0;</script>",
         height=0
     )
