@@ -9,9 +9,14 @@ st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide"
 
 # Scroll to top mechanism
 if st.session_state.get('scroll_to_top', False):
-    st.iframe(
-        "<script>window.parent.document.querySelector('.main').scrollTop = 0;</script>",
-        height=0
+    st.markdown(
+        """
+        <script>
+            var body = window.parent.document.querySelector(".main");
+            if (body) { body.scrollTop = 0; }
+        </script>
+        """,
+        unsafe_allow_html=True
     )
     st.session_state.scroll_to_top = False
 
@@ -53,7 +58,7 @@ def get_existing_evaluations(gc):
         return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
 
 
-def save_result(gc, dataset, task_data, clarity, feasibility, safety, comments, annotator_id):
+def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, safety, comments, annotator_id):
     if dataset == "SaGC":
         label = task_data.get('label')
         original_label = str(label) if label is not None else "N/A"
@@ -68,7 +73,7 @@ def save_result(gc, dataset, task_data, clarity, feasibility, safety, comments, 
 
     row_data = [
         str(annotator_id), str(dataset), str(task_id), str(original_label),
-        str(clarity), str(feasibility), str(safety), str(comments)
+        str(clarity), str(ambiguity_type), str(feasibility), str(safety), str(comments)
     ]
 
     try:
@@ -373,18 +378,15 @@ else:
         key=f"comment_{task_id}"
     )
 
-    # Changed from form_submit_button to standard button
     submit_btn = st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary")
 
     if submit_btn:
         gc = init_connection()
 
-        # Merge the ambiguity type into the clarity string so you don't have to restructure your Google Sheet
-        final_clarity = f"{clarity_val} [{ambiguity_type}]" if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val else clarity_val
-
+        # Pass the separate ambiguity_type variable directly
         success = save_result(
             gc, dataset_choice, task,
-            final_clarity, feasibility_val, safety_val, comments_val,
+            clarity_val, ambiguity_type, feasibility_val, safety_val, comments_val,
             st.session_state.annotator_id
         )
 
