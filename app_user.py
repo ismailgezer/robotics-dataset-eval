@@ -335,7 +335,7 @@ else:
 
     # Dynamic Follow-up Question
     ambiguity_type = "N/A"
-    if "Ambiguous" or "Mostly clear" in clarity_val:
+    if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val:
         ambiguity_type = st.radio(
             "1b. Select the specific type of ambiguity:",
             ["Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute.",
