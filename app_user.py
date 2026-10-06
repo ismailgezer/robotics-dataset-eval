@@ -391,7 +391,7 @@ else:
     submit_btn = st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary")
 
     if submit_btn:
-        if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val and not ambiguity_type:
+        if ("Ambiguous" in clarity_val or "Mostly clear" in clarity_val) and not ambiguity_type:
             st.error("⚠️ Please select at least one ambiguity type before submitting.")
         else:
             gc = init_connection()
