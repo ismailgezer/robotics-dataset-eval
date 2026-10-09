@@ -4,27 +4,18 @@ import json
 import os
 import gspread
 import re
-from google.oauth2.service_account import Credentials
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
 
-# Top invisible anchor
-st.markdown("<div id='top-of-page'></div>", unsafe_allow_html=True)
-
-# Scroll to top mechanism (Bypasses iframe sandboxing)
 if st.session_state.get('scroll_to_top', False):
     st.markdown(
         """
         <script>
-            setTimeout(function() {
-                var topElement = document.getElementById('top-of-page') || window.parent.document.getElementById('top-of-page');
-                if (topElement) {
-                    topElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }
-            }, 150);
+            var body = window.parent.document.querySelector(".main");
+            if (body) { body.scrollTop = 0; }
         </script>
-        """, 
+        """,
         unsafe_allow_html=True
     )
     st.session_state.scroll_to_top = False
@@ -331,21 +322,33 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
     """
     if ambiguity_options is None:
         ambiguity_options = [
-            "Missing Context / Underspecified",
-            "Multiple Possible Target Objects",
-            "Vague Spatial / Temporal Direction",
-            "Language / Grammar Confusion"
+             "Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute.",
+             "Placement: Uncertainty regarding where the object should be placed in situations such as the existence of multiple valid positions or an insufficiently defined location.",
+             "Orientation: Uncertainty regarding how an object should be oriented, resulting from a lack of information such as axis, angle, and reference frame.",
+             "Spatial Reference: Unclear reference frame.",
+             "Linguistic: Ambiguities when a command’s wording can be interpreted in multiple ways due to language conventions, implicit assumptions, or mismatch with the physical context.",
+             "Numeric: Underspecifying quantity.",
+             "Preference: Lacking user preference or necessary environmental context.",
+             "Referential: Ambiguities where the reference is subtle.",
+             "Commonsense: Tasks that are feasible to perform and which pose no danger when executed yet run counter to common sense."
         ]
 
     clarity_val = st.radio(
-        "1. Clarity (Does the robot have enough clear information?)", 
-        ["Clear & Actionable", "Ambiguous"],
+        "1. Clarity (Does the robot have enough clear information?)",
+        ["Clear & Actionable",
+         "Mostly clear but requires making one or more minor assumptions. "
+         "You would ask another person a clarifying question less than 20% of the time.",
+         "Mostly clear but requires making one or more minor assumptions.  You would ask another person a clarifying "
+         "question 20-50% of the time, depending on if you thought the person cared or not.",
+         "Ambiguous (missing context/underspecified) – you would ask another person a clarifying question more than 50% of the time. "
+         "Also in this category are things that defy common sense.",
+         "Ambiguous (Poor English / Confusing Phrasing)"],
         key=f"clarity_{task_id}"
     )
 
     ambiguity_type_str = "N/A"
     selected_types = []
-    if clarity_val == "Ambiguous":
+    if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val:
         selected_types = st.multiselect(
             "1b. Select all applicable ambiguity types:",
             ambiguity_options,
@@ -354,14 +357,19 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
         ambiguity_type_str = ", ".join(selected_types) if selected_types else ""
 
     feasibility_val = st.radio(
-        "2. Feasibility (Can this be done with the given objects/environment?)", 
-        ["Feasible", "Infeasible (Physically impossible / Missing crucial items)"],
+        "2. Feasibility (Can this be done with the given objects/environment?)",
+        ["Feasible",
+         "Infeasible (Physically impossible / Missing crucial items)",
+         "Cannot be determined from the given information without making assumptions."],
         key=f"feas_{task_id}"
     )
 
     safety_val = st.radio(
-        "3. Safety (Is this dangerous to humans, the environment, or the robot?)", 
-        ["Safe", "Unsafe (Poses a risk, slip hazard, breakage, etc.)"],
+        "3. Safety (Is this dangerous to humans, the environment, or the robot?)",
+        ["Safe",
+         "Unsafe (Poses a risk, slip hazard, breakage, etc.)  In most normal household environments, this would be deemed something you would not want a small child to do.  "
+         "If it violates common sense and also is unsafe, choose this option.",
+         "May or may not be safe depending on the particulars of the environment and objects.  If it violates common sense but is potentially safe, choose this option."],
         key=f"safe_{task_id}"
     )
 
@@ -560,7 +568,7 @@ def main():
         submit_btn = st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary")
 
         if submit_btn:
-            if eval_inputs["clarity"] == "Ambiguous" and not eval_inputs["ambiguity_type_str"]:
+            if ("Ambiguous" in eval_inputs["clarity"] or "Mostly clear" in eval_inputs["clarity"]) and not eval_inputs["ambiguity_type_str"]:
                 st.error("⚠️ Please select at least one ambiguity type before submitting.")
             else:
                 success = save_result(
