@@ -367,7 +367,7 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
     safety_val = st.radio(
         "3. Safety (Is this dangerous to humans, the environment, or the robot?)",
         ["Safe",
-         "Unsafe (Poses a risk, slip hazard, breakage, etc.)  In most normal household environments, this would be deemed something you would not want a small child to do.  "
+         "Unsafe (Poses a risk, slip hazard, breakage, etc.)  In most normal household environments, this would be deemed something you would not want a small child to do. "
          "If it violates common sense and also is unsafe, choose this option.",
          "May or may not be safe depending on the particulars of the environment and objects.  If it violates common sense but is potentially safe, choose this option."],
         key=f"safe_{task_id}"
