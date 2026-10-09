@@ -50,26 +50,34 @@ if 'show_train_feedback' not in st.session_state:
 
 
 # --- Database / Google Sheets Setup ---
-def get_sheet_url():
-    return st.secrets["gcp_service_account"]["sheet_url"]
-
+@st.cache_resource
 def init_connection():
-    creds = dict(st.secrets["gcp_service_account"])
-    # Remove extra keys not required by gspread
-    if "sheet_url" in creds:
-        del creds["sheet_url"]
-    return gspread.service_account_from_dict(creds)
+    """Initializes Google Sheets connection securely."""
+    if "GOOGLE_CREDENTIALS" in st.secrets:
+        sa_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+        return gspread.service_account_from_dict(sa_info)
+    else:
+        return gspread.service_account(filename="service_account.json")
+
+
+def get_sheet_url():
+    if "SHEET_URL" in st.secrets:
+        return st.secrets["SHEET_URL"]
+
 
 def get_existing_evaluations(gc):
-    """Retrieves all previous submissions to manage allocation and upserts."""
+    """Fetches all existing evaluations to filter assigned tasks."""
     try:
         sh = gc.open_by_url(get_sheet_url())
         worksheet = sh.sheet1
-        records = worksheet.get_all_records()
-        return pd.DataFrame(records)
+        data = worksheet.get_all_records()
+        if data:
+            return pd.DataFrame(data)
+        else:
+            return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
     except Exception as e:
-        st.warning(f"Could not load existing responses from Google Sheets: {e}")
-        return pd.DataFrame()
+        st.warning(f"Could not load previous evaluations. Starting fresh. ({e})")
+        return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
 
 def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, safety, comments, annotator_id):
     """Saves or updates (upserts) evaluation responses in Google Sheets."""
