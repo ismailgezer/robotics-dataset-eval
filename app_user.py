@@ -541,7 +541,7 @@ def main():
         current_task = dataset_data[current_idx]
         task_id = current_task.get('id', 'N/A')
 
-        st.markdown(f"### Evaluating **{dataset_choice}** (Task {current_idx + 1} of {len(dataset_data)}) — ID: `{task_id}`")
+        st.markdown(f"### Evaluating **{dataset_choice}** (Task {current_idx + 1} of {len(dataset_data)})")
 
         # Navigation Bar
         nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
