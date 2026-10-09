@@ -62,9 +62,7 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
     if dataset == "SaGC":
         label = task_data.get('label')
         original_label = str(label) if label is not None else "N/A"
-    elif dataset == "AmbiK":
-        original_label = task_data.get('ground_truth', 'N/A')
-    elif dataset == "SafeAgentBench":
+    elif dataset in ["AmbiK", "SafeAgentBench"]:
         original_label = task_data.get('ground_truth', 'N/A')
     else:
         original_label = "N/A"
@@ -79,13 +77,29 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
     try:
         sh = gc.open_by_url(get_sheet_url())
         worksheet = sh.sheet1
-        worksheet.append_row(row_data)
-        st.toast("Response saved to database!", icon="✅")
+
+        # Check if an evaluation already exists for this annotator and task
+        all_records = worksheet.get_all_records()
+        existing_row_idx = None
+        for idx, record in enumerate(all_records, start=2):  # Row 1 is headers
+            if (str(record.get('Annotator_ID')) == str(annotator_id) and
+                    str(record.get('Dataset')) == str(dataset) and
+                    str(record.get('Task_ID')) == str(task_id)):
+                existing_row_idx = idx
+                break
+
+        if existing_row_idx:
+            # Overwrite the existing row (Columns A through I)
+            worksheet.update(f"A{existing_row_idx}:I{existing_row_idx}", [row_data])
+            st.toast("Previous evaluation updated in database!", icon="🔄")
+        else:
+            worksheet.append_row(row_data)
+            st.toast("Response saved to database!", icon="✅")
+
         return True
     except Exception as e:
         st.error(f"Error saving to Google Sheets: {e}")
         return False
-
 
 # --- Data Loading & Task Allocation ---
 def load_raw_data(file_path, file_type, dataset_prefix="Task"):
@@ -251,34 +265,12 @@ else:
             env = task.get('Environment Short') or task.get('environment_short') or "N/A"
             st.write("**Kitchen Items:**", env)
 
+
         elif dataset_choice == "SafeAgentBench":
             scene_name = task.get('scene_name', 'N/A')
             st.write(f"**Scene Name:** {scene_name}")
 
-            # --- Robust Object Extraction ---
-            inv_objs = set()
-
-            # 1. Check 'objects' list
-            if isinstance(task.get('objects'), list):
-                inv_objs.update(task.get('objects'))
-            # 2. Check 'involved_objects' list
-            if isinstance(task.get('involved_objects'), list):
-                inv_objs.update(task.get('involved_objects'))
-            # 3. Check 'final_state' for objectTypes
-            final_state = task.get('final_state')
-            if isinstance(final_state, list):
-                for fs in final_state:
-                    if isinstance(fs, dict) and 'objectType' in fs:
-                        inv_objs.add(fs['objectType'])
-            # 4. Fallback: Parse the 'step' array for words after 'find'
-            if not inv_objs and isinstance(task.get('step'), list):
-                for s in task.get('step'):
-                    if str(s).lower().startswith('find '):
-                        inv_objs.add(str(s)[5:].strip())
-
-            inv_objs = list(inv_objs)
-
-            # --- Load Workspace Context ---
+            # 1. Load Workspace Context
             workspace_desc = "Description not found."
             if scene_name != 'N/A':
                 try:
@@ -288,28 +280,55 @@ else:
                 except FileNotFoundError:
                     st.error("Missing 'thor_workspaces.json'.")
 
-                # --- Object Presence Checker ---
-                if inv_objs:
-                    st.write("**Object Presence Check:**")
-                    for obj in inv_objs:
-                        if str(obj).lower() in workspace_desc.lower():
-                            pattern = re.compile(rf"\b{re.escape(str(obj))}\b\s*\(instances?:\s*(\d+)\)",
-                                                 re.IGNORECASE)
-                            match = pattern.search(workspace_desc)
+            # 2. Parse all actual workspace objects and instance counts into a map
+            # Matches formats like: "HousePlant (instances: 2)"
+            ws_objects_map = {}
+            raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count):\s*(\d+)\)', workspace_desc)
+            for obj_name, count in raw_matches:
+                # Convert "HousePlant" -> "house plant" and "houseplant" for flexible matching
+                clean_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', obj_name).lower().strip()
+                ws_objects_map[clean_spaced] = (obj_name, int(count))
+                ws_objects_map[obj_name.lower()] = (obj_name, int(count))
 
-                            if match:
-                                count = match.group(1)
-                                st.markdown(f"- ✅ **{obj}** is present (Instances: {count})")
-                            else:
-                                st.markdown(f"- ✅ **{obj}** is present in the scene")
-                        else:
-                            st.markdown(f"- ❌ **{obj}** was NOT found in the scene")
-                else:
-                    st.write("**Object Presence Check:** No distinct objects identified.")
+            # 3. Extract target objects specified in this task
+            extracted_targets = set()
+            # Check explicit metadata lists
+            for field in ['objects', 'involved_objects']:
+                items = task.get(field)
+                if isinstance(items, list):
+                    for item in items:
+                        extracted_targets.add(str(item).strip())
+            # Check final_state
+            final_state = task.get('final_state')
+            if isinstance(final_state, list):
+                for fs in final_state:
+                    if isinstance(fs, dict) and 'objectType' in fs:
+                        extracted_targets.add(str(fs['objectType']).strip())
+            # Check instruction text against known workspace objects to ensure nothing is missed
+            instruction_text = (
+                        str(task.get('instruction') or '') + " " + str(task.get('risk_instruction') or '')).lower()
+            for norm_key, (raw_name, _) in ws_objects_map.items():
+                if norm_key in instruction_text:
+                    extracted_targets.add(raw_name)
 
-                # --- The Restored Expander ---
-                with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
-                    st.code(workspace_desc, language="text")
+            # 4. Display Object Presence Status
+            if extracted_targets:
+                st.write("**Object Presence Check:**")
+                for target_obj in sorted(extracted_targets):
+                    norm_target = target_obj.lower().replace("_", " ").strip()
+                    # Also try spacing PascalCase strings (e.g., "HousePlant" -> "house plant")
+                    norm_target_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', target_obj).lower().strip()
+                    match_info = ws_objects_map.get(norm_target) or ws_objects_map.get(norm_target_spaced)
+                    if match_info:
+                        display_name, instance_count = match_info
+                        st.markdown(f"- ✅ **{target_obj}** is present (Instances: {instance_count})")
+                    else:
+                        st.markdown(f"- ❌ **{target_obj}** was NOT found in the scene")
+            else:
+                st.write("**Object Presence Check:** No task-specific objects identified.")
+            # Expandable full workspace state
+            with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
+                st.code(workspace_desc, language="text")
 
     with col2:
         st.subheader("Command / Instruction")
@@ -329,6 +348,20 @@ else:
                 st.error("No instruction found for this task.")
 
     st.divider()
+
+    # Navigation controls (Previous / Next task buttons)
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+    with nav_col1:
+        if st.button("⬅️ Previous Task", disabled=(current_idx == 0), key=f"prev_{dataset_choice}_{task_id}"):
+            st.session_state.current_idx[dataset_choice] -= 1
+            st.session_state.scroll_to_top = True
+            st.rerun()
+    with nav_col3:
+        if st.button("Next Task ➡️", disabled=(current_idx >= len(dataset_data) - 1),
+                     key=f"next_{dataset_choice}_{task_id}"):
+            st.session_state.current_idx[dataset_choice] += 1
+            st.session_state.scroll_to_top = True
+            st.rerun()
 
     # --- Unified Evaluation Section ---
     st.subheader("Evaluate This Task")
