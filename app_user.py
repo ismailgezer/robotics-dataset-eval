@@ -101,6 +101,7 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
         st.error(f"Error saving to Google Sheets: {e}")
         return False
 
+
 # --- Data Loading & Task Allocation ---
 def load_raw_data(file_path, file_type, dataset_prefix="Task"):
     """Loads data, ensures unique IDs, and expands multi-state tasks."""
@@ -280,53 +281,99 @@ else:
                 except FileNotFoundError:
                     st.error("Missing 'thor_workspaces.json'.")
 
-            # 2. Parse all actual workspace objects and instance counts into a map
-            # Matches formats like: "HousePlant (instances: 2)"
+            # 2. Extract ALL workspace objects & counts into flexible lookup structures
             ws_objects_map = {}
-            raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count):\s*(\d+)\)', workspace_desc)
+            raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
+                                     re.IGNORECASE)
             for obj_name, count in raw_matches:
-                # Convert "HousePlant" -> "house plant" and "houseplant" for flexible matching
-                clean_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', obj_name).lower().strip()
-                ws_objects_map[clean_spaced] = (obj_name, int(count))
-                ws_objects_map[obj_name.lower()] = (obj_name, int(count))
+                count_val = int(count)
+                norm_plain = re.sub(r'[^a-z0-9]', '', obj_name.lower())
+                ws_objects_map[norm_plain] = (obj_name, count_val)
+            # Raw normalized workspace string for fallback presence checking
+            ws_normalized_text = re.sub(r'[^a-z0-9]', '', workspace_desc.lower())
+            # Helper to normalize object strings (strips state modifiers like "dirty", "clean", "broken")
+            def normalize_obj_key(s):
+                s_clean = re.sub(r'^(dirty|clean|broken|open|opened|closed|turned on|turned off|lit|unlit)\s+', '',
+                                 str(s).strip(), flags=re.IGNORECASE)
+                return re.sub(r'[^a-z0-9]', '', s_clean.lower())
 
-            # 3. Extract target objects specified in this task
+            # 3. Comprehensive Target Object Extraction
             extracted_targets = set()
-            # Check explicit metadata lists
+            # A. Explicit metadata lists
             for field in ['objects', 'involved_objects']:
                 items = task.get(field)
                 if isinstance(items, list):
                     for item in items:
-                        extracted_targets.add(str(item).strip())
-            # Check final_state
+                        if item and str(item).strip():
+                            extracted_targets.add(str(item).strip())
+            # B. Check 'final_state' (both target objectType AND parentReceptacles)
             final_state = task.get('final_state')
             if isinstance(final_state, list):
                 for fs in final_state:
-                    if isinstance(fs, dict) and 'objectType' in fs:
-                        extracted_targets.add(str(fs['objectType']).strip())
-            # Check instruction text against known workspace objects to ensure nothing is missed
-            instruction_text = (
+                    if isinstance(fs, dict):
+                        if fs.get('objectType'):
+                            extracted_targets.add(str(fs['objectType']).strip())
+                        if isinstance(fs.get('parentReceptacles'), list):
+                            for receptacle in fs['parentReceptacles']:
+                                if receptacle:
+                                    extracted_targets.add(str(receptacle).strip())
+            # C. Parse 'step' actions (e.g., "find Sink", "open Cabinet")
+            steps = task.get('step')
+            if isinstance(steps, list):
+                for s in steps:
+                    s_str = str(s).strip()
+                    action_match = re.search(
+                        r'^(?:find|pick|turn\s+on|turn\s+off|open|close|put|drop|dirty|clean|fillLiquid|pour|break|slice|use)\s+(.+)$',
+                        s_str, re.IGNORECASE)
+                    if action_match:
+                        extracted_targets.add(action_match.group(1).strip())
+            # D. Instruction text cross-referencing
+            instruction_combined = (
                         str(task.get('instruction') or '') + " " + str(task.get('risk_instruction') or '')).lower()
             for norm_key, (raw_name, _) in ws_objects_map.items():
-                if norm_key in instruction_text:
+                raw_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw_name).lower()
+                if raw_spaced in instruction_combined or raw_name.lower() in instruction_combined:
                     extracted_targets.add(raw_name)
 
-            # 4. Display Object Presence Status
+            # 4. Accurate Object Presence Evaluation
             if extracted_targets:
                 st.write("**Object Presence Check:**")
-                for target_obj in sorted(extracted_targets):
-                    norm_target = target_obj.lower().replace("_", " ").strip()
-                    # Also try spacing PascalCase strings (e.g., "HousePlant" -> "house plant")
-                    norm_target_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', target_obj).lower().strip()
-                    match_info = ws_objects_map.get(norm_target) or ws_objects_map.get(norm_target_spaced)
+                unique_targets = {}
+                for tgt in extracted_targets:
+                    norm_k = normalize_obj_key(tgt)
+                    if norm_k not in unique_targets:
+                        unique_targets[norm_k] = tgt
+                for norm_k, display_tgt in sorted(unique_targets.items(), key=lambda x: x[1]):
+                    # Direct map lookup or singular/plural variants
+                    match_info = ws_objects_map.get(norm_k)
+                    if not match_info:
+                        if norm_k.endswith('s') and norm_k[:-1] in ws_objects_map:
+                            match_info = ws_objects_map.get(norm_k[:-1])
+                        elif norm_k + 's' in ws_objects_map:
+                            match_info = ws_objects_map.get(norm_k + 's')
+                    is_in_workspace = False
+                    found_count = None
                     if match_info:
-                        display_name, instance_count = match_info
-                        st.markdown(f"- ✅ **{target_obj}** is present (Instances: {instance_count})")
+                        is_in_workspace = True
+                        _, found_count = match_info
                     else:
-                        st.markdown(f"- ❌ **{target_obj}** was NOT found in the scene")
+                        # Fallback text search guarantees zero false negatives if object exists in workspace description
+                        if norm_k in ws_normalized_text or (norm_k.endswith('s') and norm_k[:-1] in ws_normalized_text):
+                            is_in_workspace = True
+                            count_match = re.search(rf'{re.escape(display_tgt)}\s*\((?:instances?|count)?:\s*(\d+)\)',
+                                                    workspace_desc, re.IGNORECASE)
+                            if count_match:
+                                found_count = int(count_match.group(1))
+                    if is_in_workspace:
+                        if found_count is not None:
+                            st.markdown(f"- ✅ **{display_tgt}** is present (Instances: {found_count})")
+                        else:
+                            st.markdown(f"- ✅ **{display_tgt}** is present in the scene")
+                    else:
+                        st.markdown(f"- ❌ **{display_tgt}** was NOT found in the scene")
             else:
                 st.write("**Object Presence Check:** No task-specific objects identified.")
-            # Expandable full workspace state
+            # Expandable complete workspace state
             with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
                 st.code(workspace_desc, language="text")
 
