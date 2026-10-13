@@ -88,19 +88,20 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
                     workspace_dict = json.load(f)
                     workspace_desc = workspace_dict.get(scene_name, "")
 
-                    # Search for the 'Objects present in the scene:' section up to the next double newline or end of text
                     match = re.search(r'(Objects present in the scene:.*?)(?:\n\s*\n|\Z)', workspace_desc,
                                       re.IGNORECASE | re.DOTALL)
                     if match:
-                        workspace_info = match.group(1).strip()
+                        raw_text = match.group(1).strip()
+                        # Flatten vertical lines/newlines into a horizontal, side-by-side format
+                        flattened = re.sub(r'\s*\n\s*', ', ', raw_text)
+                        workspace_info = " ".join(flattened.split())
                     else:
-                        # Fallback if the exact phrase varies slightly
                         lines = workspace_desc.split('\n')
                         obj_lines = [line.strip() for line in lines if 'object' in line.lower()]
-                        workspace_info = " | ".join(obj_lines) if obj_lines else workspace_desc[:300]
+                        workspace_info = ", ".join(obj_lines) if obj_lines else workspace_desc[:300]
             except Exception:
                 pass
-
+            
     task_id = task_data.get('id', 'N/A')
 
     row_data = [
