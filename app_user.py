@@ -333,6 +333,11 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
              "Commonsense: Tasks that are feasible to carry out, but that run counter to common sense, regardless of whether they pose a danger when performed."
         ]
 
+    current_selected = st.session_state.get(f"ambig_type_{task_id}", [])
+    for item in current_selected:
+        if item and item not in ambiguity_options:
+            ambiguity_options.append(item)
+
     clarity_val = st.radio(
         "1. Clarity (Does the robot have enough clear information?)",
         ["Clear & Actionable",
@@ -581,8 +586,9 @@ def main():
                     st.session_state[clarity_key] = str(row.get('Clarity', 'Clear & Actionable'))
 
                     ambig_str = str(row.get('Ambiguity_Type', 'N/A'))
-                    if ambig_str and ambig_str != 'N/A':
-                        st.session_state[ambig_key] = [x.strip() for x in ambig_str.split(',')]
+                    if ambig_str and ambig_str != 'N/A' and ambig_str != '':
+                        saved_ambig_list = [x.strip() for x in ambig_str.split(',')]
+                        st.session_state[ambig_key] = saved_ambig_list
                     else:
                         st.session_state[ambig_key] = []
 
