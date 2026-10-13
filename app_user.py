@@ -26,6 +26,7 @@ AMBIK_SUBSET = "ambik_test_900.csv"
 SAFE_SUBSET = "mixed_detailed_1009.jsonl"
 TRAINING_FILE = "training_tasks.json"
 
+
 # --- Database Connection ---
 @st.cache_resource
 def init_connection():
@@ -56,47 +57,82 @@ def get_existing_evaluations(gc):
         st.warning(f"Could not load previous evaluations. Starting fresh. ({e})")
         return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
 
+
 def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, safety, comments, annotator_id):
-    """Saves or updates evaluation results in Google Sheets (Retroactive Upsert)."""
+    """Saves or updates evaluation results in Google Sheets including Instruction and Workspace/Objects."""
     if dataset == "SaGC":
         label = task_data.get('label')
         original_label = str(label) if label is not None else "N/A"
-    elif dataset in ["AmbiK", "SafeAgentBench"]:
+        instruction = task_data.get('goal', 'N/A')
+        scene = task_data.get('scene', {})
+        rooms = ", ".join(scene.get('floorplan', []))
+        objs = ", ".join(scene.get('objects', []))
+        ppl = ", ".join(scene.get('people', []))
+        workspace_info = f"Rooms: {rooms} | Objects: {objs} | People: {ppl}"
+    elif dataset == "AmbiK":
         original_label = task_data.get('ground_truth', 'N/A')
+        instruction = (task_data.get('eval_instruction') or task_data.get('instruction') or
+                       task_data.get('Ambiguous Task') or task_data.get('Unambiguous Direct') or 'N/A')
+        workspace_info = str(task_data.get('Environment Short') or task_data.get('environment_short') or task_data.get(
+            'Environment Full') or 'N/A')
+    elif dataset == "SafeAgentBench":
+        original_label = task_data.get('ground_truth', 'N/A')
+        instruction = task_data.get('instruction') or task_data.get('risk_instruction') or 'N/A'
+
+        # Extract objects for SafeAgentBench from thor_workspaces.json
+        scene_name = task_data.get('scene_name', 'N/A')
+        workspace_objects = []
+        if scene_name != 'N/A':
+            try:
+                with open("thor_workspaces.json", "r") as f:
+                    workspace_dict = json.load(f)
+                workspace_desc = workspace_dict.get(scene_name, "")
+                raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
+                                         re.IGNORECASE)
+                workspace_objects = [obj for obj, _ in raw_matches]
+            except Exception:
+                pass
+        workspace_info = ", ".join(workspace_objects) if workspace_objects else f"Scene: {scene_name}"
     else:
         original_label = "N/A"
+        instruction = "N/A"
+        workspace_info = "N/A"
 
     task_id = task_data.get('id', 'N/A')
 
+    # Expanded row data including Instruction and Workspace Info (Columns A through K)
     row_data = [
         str(annotator_id), str(dataset), str(task_id), str(original_label),
+        str(instruction), str(workspace_info),
         str(clarity), str(ambiguity_type), str(feasibility), str(safety), str(comments)
     ]
 
     try:
         sh = gc.open_by_url(get_sheet_url())
         worksheet = sh.sheet1
-        
+
         all_records = worksheet.get_all_records()
         existing_row_idx = None
         for idx, record in enumerate(all_records, start=2):  # Row 1 is header
-            if (str(record.get('Annotator_ID')) == str(annotator_id) and 
-                str(record.get('Dataset')) == str(dataset) and 
-                str(record.get('Task_ID')) == str(task_id)):
+            if (str(record.get('Annotator_ID')) == str(annotator_id) and
+                    str(record.get('Dataset')) == str(dataset) and
+                    str(record.get('Task_ID')) == str(task_id)):
                 existing_row_idx = idx
                 break
 
         if existing_row_idx:
-            worksheet.update(f"A{existing_row_idx}:I{existing_row_idx}", [row_data])
+            # Overwrite rows A through K
+            worksheet.update(f"A{existing_row_idx}:K{existing_row_idx}", [row_data])
             st.toast("Previous evaluation updated in database!", icon="🔄")
         else:
             worksheet.append_row(row_data)
             st.toast("Response saved to database!", icon="✅")
-            
+
         return True
     except Exception as e:
         st.error(f"Error saving to Google Sheets: {e}")
         return False
+
 
 # --- Data Loading Utilities ---
 def load_raw_data(file_path, file_type, dataset_prefix="Task"):
@@ -113,14 +149,14 @@ def load_raw_data(file_path, file_type, dataset_prefix="Task"):
                 ambig_task['ground_truth'] = "ambiguous"
                 ambig_task['eval_instruction'] = rec.get('Ambiguous Task') or rec.get('ambiguous_task')
                 expanded_records.append(ambig_task)
-                
+
                 # 2. Clear Task Variant
                 clear_task = rec.copy()
                 clear_task['id'] = f"{dataset_prefix}_{i}_clear"
                 clear_task['ground_truth'] = "clear"
                 clear_task['eval_instruction'] = rec.get('Unambiguous Direct') or rec.get('unambiguous_direct')
                 expanded_records.append(clear_task)
-                
+
             return expanded_records
 
         elif file_type == 'jsonl':
@@ -132,21 +168,24 @@ def load_raw_data(file_path, file_type, dataset_prefix="Task"):
             if isinstance(data, dict):
                 records = []
                 for key, val in data.items():
-                    val['id'] = key 
+                    val['id'] = key
                     records.append(val)
             elif isinstance(data, list):
                 records = data
-            else: return []
-        else: return []
-        
+            else:
+                return []
+        else:
+            return []
+
         for i, rec in enumerate(records):
             if 'id' not in rec:
                 rec['id'] = f"{dataset_prefix}_{i}"
-                
+
         return records
     except Exception as e:
         st.error(f"Error loading {dataset_prefix}: {e}")
         return []
+
 
 def allocate_tasks(raw_data, existing_df, dataset_name, annotator_id, sample_size):
     """Allocates available tasks, skipping tasks completed twice or already completed by this user."""
@@ -155,7 +194,8 @@ def allocate_tasks(raw_data, existing_df, dataset_name, annotator_id, sample_siz
         counts = {}
     else:
         ds_records = existing_df[existing_df['Dataset'] == dataset_name]
-        user_completed = set(ds_records[ds_records['Annotator_ID'].astype(str) == str(annotator_id)]['Task_ID'].astype(str))
+        user_completed = set(
+            ds_records[ds_records['Annotator_ID'].astype(str) == str(annotator_id)]['Task_ID'].astype(str))
         counts = ds_records['Task_ID'].astype(str).value_counts().to_dict()
 
     eligible_tasks = []
@@ -165,38 +205,41 @@ def allocate_tasks(raw_data, existing_df, dataset_name, annotator_id, sample_siz
             continue
         if counts.get(tid, 0) < 2:
             eligible_tasks.append(task)
-            
+
     return eligible_tasks[:sample_size]
+
 
 def check_user_trained(existing_df, annotator_id):
     """Checks whether the user has completed the calibration/training session."""
     if existing_df.empty:
         return False
     trained_records = existing_df[
-        (existing_df['Annotator_ID'].astype(str) == str(annotator_id)) & 
+        (existing_df['Annotator_ID'].astype(str) == str(annotator_id)) &
         (existing_df['Dataset'] == '[TRAINING_COMPLETE]')
-    ]
+        ]
     return not trained_records.empty
+
 
 # --- Reusable Component 1: Task Display ---
 def render_task_display(task, dataset_choice):
     """Renders environment, workspace details, object presence check, and instruction prompt."""
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.subheader("Environment & Workspace")
-        
+
         if dataset_choice == "SaGC":
             scene = task.get('scene', {})
             st.write("**Rooms / Floorplan:**", ", ".join(scene.get('floorplan', [])))
             st.write("**Objects Present:**", ", ".join(scene.get('objects', [])))
             if 'people' in scene:
                 st.write("**People:**", ", ".join(scene.get('people', [])))
-                
+
         elif dataset_choice == "AmbiK":
-            env = task.get('Environment Short') or task.get('environment_short') or task.get('Environment Full') or "N/A"
+            env = task.get('Environment Short') or task.get('environment_short') or task.get(
+                'Environment Full') or "N/A"
             st.write("**Kitchen Items:**", env)
-            
+
         elif dataset_choice == "SafeAgentBench":
             scene_name = task.get('scene_name', 'N/A')
             st.write(f"**Scene Name:** {scene_name}")
@@ -213,7 +256,8 @@ def render_task_display(task, dataset_choice):
 
             # Parse workspace objects & counts into map
             ws_objects_map = {}
-            raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc, re.IGNORECASE)
+            raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
+                                     re.IGNORECASE)
             for obj_name, count in raw_matches:
                 count_val = int(count)
                 norm_plain = re.sub(r'[^a-z0-9]', '', obj_name.lower())
@@ -222,7 +266,8 @@ def render_task_display(task, dataset_choice):
             ws_normalized_text = re.sub(r'[^a-z0-9]', '', workspace_desc.lower())
 
             def normalize_obj_key(s):
-                s_clean = re.sub(r'^(dirty|clean|broken|open|opened|closed|turned on|turned off|lit|unlit)\s+', '', str(s).strip(), flags=re.IGNORECASE)
+                s_clean = re.sub(r'^(dirty|clean|broken|open|opened|closed|turned on|turned off|lit|unlit)\s+', '',
+                                 str(s).strip(), flags=re.IGNORECASE)
                 return re.sub(r'[^a-z0-9]', '', s_clean.lower())
 
             # Extract Target Objects
@@ -250,11 +295,14 @@ def render_task_display(task, dataset_choice):
             if isinstance(steps, list):
                 for s in steps:
                     s_str = str(s).strip()
-                    action_match = re.search(r'^(?:find|pick|turn\s+on|turn\s+off|open|close|put|drop|dirty|clean|fillLiquid|pour|break|slice|use)\s+(.+)$', s_str, re.IGNORECASE)
+                    action_match = re.search(
+                        r'^(?:find|pick|turn\s+on|turn\s+off|open|close|put|drop|dirty|clean|fillLiquid|pour|break|slice|use)\s+(.+)$',
+                        s_str, re.IGNORECASE)
                     if action_match:
                         extracted_targets.add(action_match.group(1).strip())
 
-            instruction_combined = (str(task.get('instruction') or '') + " " + str(task.get('risk_instruction') or '')).lower()
+            instruction_combined = (
+                        str(task.get('instruction') or '') + " " + str(task.get('risk_instruction') or '')).lower()
             for norm_key, (raw_name, _) in ws_objects_map.items():
                 raw_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw_name).lower()
                 if raw_spaced in instruction_combined or raw_name.lower() in instruction_combined:
@@ -285,7 +333,8 @@ def render_task_display(task, dataset_choice):
                     else:
                         if norm_k in ws_normalized_text or (norm_k.endswith('s') and norm_k[:-1] in ws_normalized_text):
                             is_in_workspace = True
-                            count_match = re.search(rf'{re.escape(display_tgt)}\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc, re.IGNORECASE)
+                            count_match = re.search(rf'{re.escape(display_tgt)}\s*\((?:instances?|count)?:\s*(\d+)\)',
+                                                    workspace_desc, re.IGNORECASE)
                             if count_match:
                                 found_count = int(count_match.group(1))
 
@@ -308,11 +357,13 @@ def render_task_display(task, dataset_choice):
             st.success(f"**Goal:** {task.get('goal', 'N/A')}")
             st.write(f"**Task Category:** {task.get('task', 'N/A')}")
         elif dataset_choice == "AmbiK":
-            instr = task.get('eval_instruction') or task.get('instruction') or task.get('Ambiguous Task') or task.get('Unambiguous Direct') or 'N/A'
+            instr = task.get('eval_instruction') or task.get('instruction') or task.get('Ambiguous Task') or task.get(
+                'Unambiguous Direct') or 'N/A'
             st.success(f"**Instruction:** {instr}")
         elif dataset_choice == "SafeAgentBench":
             instr = task.get('instruction') or task.get('risk_instruction') or 'N/A'
             st.success(f"**Instruction:** {instr}")
+
 
 # --- Reusable Component 2: Evaluation Form Widgets ---
 def render_evaluation_widgets(task_id, ambiguity_options=None):
@@ -322,15 +373,15 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
     """
     if ambiguity_options is None:
         ambiguity_options = [
-             "Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute, including which one of multiple objects.",
-             "Placement: Uncertainty regarding where the object should be placed in situations such as the existence of multiple valid positions or an insufficiently defined location.",
-             "Orientation: Uncertainty regarding how an object should be oriented, resulting from a lack of information such as axis, angle, and reference frame.",
-             "Spatial Reference: Unclear reference frame.",
-             "Linguistic: Ambiguities when a command’s wording can be interpreted in multiple ways due to language conventions, implicit assumptions, or mismatch with the physical context.",
-             "Numeric: Underspecifying quantity.",
-             "Preference: Lacking user preference or necessary environmental context.",
-             "Referential: Ambiguities where the reference is subtle.",
-             "Commonsense: Tasks that are feasible to carry out, but that run counter to common sense, regardless of whether they pose a danger when performed."
+            "Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute, including which one of multiple objects.",
+            "Placement: Uncertainty regarding where the object should be placed in situations such as the existence of multiple valid positions or an insufficiently defined location.",
+            "Orientation: Uncertainty regarding how an object should be oriented, resulting from a lack of information such as axis, angle, and reference frame.",
+            "Spatial Reference: Unclear reference frame.",
+            "Linguistic: Ambiguities when a command’s wording can be interpreted in multiple ways due to language conventions, implicit assumptions, or mismatch with the physical context.",
+            "Numeric: Underspecifying quantity.",
+            "Preference: Lacking user preference or necessary environmental context.",
+            "Referential: Ambiguities where the reference is subtle.",
+            "Commonsense: Tasks that are feasible to carry out, but that run counter to common sense, regardless of whether they pose a danger when performed."
         ]
 
     current_selected = st.session_state.get(f"ambig_type_{task_id}", [])
@@ -379,7 +430,7 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
     )
 
     comments_val = st.text_area(
-        "4. Additional Comments (Optional)", 
+        "4. Additional Comments (Optional)",
         placeholder="Note any ground truth errors or edge cases...",
         key=f"comment_{task_id}"
     )
@@ -393,11 +444,13 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
         "comments": comments_val
     }
 
+
 # --- Training / Calibration Session Module ---
 def render_training_module(gc, annotator_id):
     """Renders calibration session using exact same UI components as live evaluation."""
-    st.info("🎓 **Annotator Calibration Session**: Complete these benchmark tasks to align with evaluation standards before proceeding to live tasks.")
-    
+    st.info(
+        "🎓 **Annotator Calibration Session**: Complete these benchmark tasks to align with evaluation standards before proceeding to live tasks.")
+
     try:
         with open(TRAINING_FILE, "r") as f:
             train_tasks = json.load(f)
@@ -415,7 +468,8 @@ def render_training_module(gc, annotator_id):
     if t_idx >= len(train_tasks):
         st.success("🎉 **Calibration Complete!** You have unlocked the live dataset evaluation queue.")
         if st.button("Proceed to Live Evaluations 🚀", type="primary"):
-            save_result(gc, "[TRAINING_COMPLETE]", {"id": "PASSED"}, "N/A", "N/A", "N/A", "N/A", "Completed calibration", annotator_id)
+            save_result(gc, "[TRAINING_COMPLETE]", {"id": "PASSED"}, "N/A", "N/A", "N/A", "N/A",
+                        "Completed calibration", annotator_id)
             st.session_state.is_trained = True
             st.session_state.scroll_to_top = True
             st.rerun()
@@ -423,7 +477,7 @@ def render_training_module(gc, annotator_id):
 
     task = train_tasks[t_idx]
     st.write(f"### Calibration Task {t_idx + 1} of {len(train_tasks)} ({task.get('dataset', 'Benchmark')})")
-    
+
     # 1. Reuse task display
     render_task_display(task, dataset_choice=task.get('dataset', 'AmbiK'))
     st.divider()
@@ -447,7 +501,7 @@ def render_training_module(gc, annotator_id):
         c_match = eval_inputs["clarity"] == task.get('expected_clarity')
         f_match = eval_inputs["feasibility"] == task.get('expected_feasibility')
         s_match = eval_inputs["safety"] == task.get('expected_safety')
-        
+
         ambig_match = True
         if task.get('expected_ambiguity_types'):
             expected_set = set(task['expected_ambiguity_types'])
@@ -475,10 +529,11 @@ def render_training_module(gc, annotator_id):
 
     return False
 
+
 # --- Main Application Session ---
 def main():
     st.title("🤖 Robotics Dataset Evaluation Interface")
-    
+
     # Initialize Session State
     if 'sampled_data' not in st.session_state:
         st.session_state.sampled_data = {}
@@ -498,7 +553,7 @@ def main():
         gc = init_connection()
         existing_df = get_existing_evaluations(gc)
         st.session_state.existing_df = existing_df
-        
+
         st.session_state.annotator_id = annotator_id
         st.session_state.is_trained = check_user_trained(existing_df, annotator_id)
 
@@ -507,15 +562,18 @@ def main():
         raw_safe = load_raw_data(SAFE_SUBSET, 'jsonl', 'SafeAgentBench')
 
         st.session_state.sampled_data['SaGC'] = allocate_tasks(raw_sagc, existing_df, "SaGC", annotator_id, sample_size)
-        st.session_state.sampled_data['AmbiK'] = allocate_tasks(raw_ambik, existing_df, "AmbiK", annotator_id, sample_size)
-        st.session_state.sampled_data['SafeAgentBench'] = allocate_tasks(raw_safe, existing_df, "SafeAgentBench", annotator_id, sample_size)
+        st.session_state.sampled_data['AmbiK'] = allocate_tasks(raw_ambik, existing_df, "AmbiK", annotator_id,
+                                                                sample_size)
+        st.session_state.sampled_data['SafeAgentBench'] = allocate_tasks(raw_safe, existing_df, "SafeAgentBench",
+                                                                         annotator_id, sample_size)
 
         st.session_state.current_idx = {'SaGC': 0, 'AmbiK': 0, 'SafeAgentBench': 0}
 
-        is_returning = not existing_df[existing_df['Annotator_ID'].astype(str) == str(annotator_id)].empty if not existing_df.empty else False
+        is_returning = not existing_df[
+            existing_df['Annotator_ID'].astype(str) == str(annotator_id)].empty if not existing_df.empty else False
         greeting = "Welcome back" if is_returning else "Welcome"
         total_allocated = sum(len(v) for v in st.session_state.sampled_data.values())
-        
+
         st.sidebar.success(f"{greeting}, {annotator_id}! Allocated {total_allocated} total tasks across datasets.")
         st.session_state.scroll_to_top = True
         st.rerun()
@@ -536,7 +594,8 @@ def main():
         dataset_data = st.session_state.sampled_data.get(dataset_choice, [])
 
         if not dataset_data:
-            st.info(f"No remaining tasks allocated for dataset '{dataset_choice}'. All tasks completed or max limit reached!")
+            st.info(
+                f"No remaining tasks allocated for dataset '{dataset_choice}'. All tasks completed or max limit reached!")
             return
 
         current_idx = st.session_state.current_idx[dataset_choice]
@@ -557,7 +616,8 @@ def main():
                 st.session_state.scroll_to_top = True
                 st.rerun()
         with nav_col3:
-            if st.button("Next Task ➡️", disabled=(current_idx >= len(dataset_data) - 1), key=f"next_{dataset_choice}_{task_id}"):
+            if st.button("Next Task ➡️", disabled=(current_idx >= len(dataset_data) - 1),
+                         key=f"next_{dataset_choice}_{task_id}"):
                 st.session_state.current_idx[dataset_choice] += 1
                 st.session_state.scroll_to_top = True
                 st.rerun()
@@ -610,7 +670,8 @@ def main():
         submit_btn = st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary")
 
         if submit_btn:
-            if ("Ambiguous" in eval_inputs["clarity"] or "Mostly clear" in eval_inputs["clarity"]) and not eval_inputs["ambiguity_type_str"]:
+            if ("Ambiguous" in eval_inputs["clarity"] or "Mostly clear" in eval_inputs["clarity"]) and not eval_inputs[
+                "ambiguity_type_str"]:
                 st.error("⚠️ Please select at least one ambiguity type before submitting.")
             else:
                 success = save_result(
@@ -645,6 +706,7 @@ def main():
 
     else:
         st.info("👈 Enter your Annotator ID in the sidebar to begin.")
+
 
 if __name__ == "__main__":
     main()
