@@ -322,7 +322,7 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
     """
     if ambiguity_options is None:
         ambiguity_options = [
-             "Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute.",
+             "Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute, including which one of multiple objects.",
              "Placement: Uncertainty regarding where the object should be placed in situations such as the existence of multiple valid positions or an insufficiently defined location.",
              "Orientation: Uncertainty regarding how an object should be oriented, resulting from a lack of information such as axis, angle, and reference frame.",
              "Spatial Reference: Unclear reference frame.",
