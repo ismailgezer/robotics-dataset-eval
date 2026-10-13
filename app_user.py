@@ -359,7 +359,7 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
             ambiguity_options,
             key=f"ambig_type_{task_id}"
         )
-        ambiguity_type_str = ", ".join(selected_types) if selected_types else ""
+        ambiguity_type_str = json.dumps(selected_types) if selected_types else ""
 
     feasibility_val = st.radio(
         "2. Feasibility (Can this be done with the given objects/environment?)",
@@ -587,7 +587,13 @@ def main():
 
                     ambig_str = str(row.get('Ambiguity_Type', 'N/A'))
                     if ambig_str and ambig_str != 'N/A' and ambig_str != '':
-                        saved_ambig_list = [x.strip() for x in ambig_str.split(',')]
+                        try:
+                            saved_ambig_list = json.loads(ambig_str)
+                            if not isinstance(saved_ambig_list, list):
+                                saved_ambig_list = [ambig_str]
+                        except json.JSONDecodeError:
+                            saved_ambig_list = [x.strip() for x in ambig_str.split(',') if x.strip()]
+
                         st.session_state[ambig_key] = saved_ambig_list
                     else:
                         st.session_state[ambig_key] = []
