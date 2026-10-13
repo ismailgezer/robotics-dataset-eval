@@ -80,39 +80,29 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
         instruction = task_data.get('instruction') or task_data.get('risk_instruction') or 'N/A'
 
         # Extract objects for SafeAgentBench from thor_workspaces.json
-        extracted_objs = set()
-        for field in ['objects', 'involved_objects']:
-            items = task_data.get(field)
-            if isinstance(items, list):
-                for item in items:
-                    if item and str(item).strip():
-                        extracted_objs.add(str(item).strip())
-        final_state = task_data.get('final_state')
-        if isinstance(final_state, list):
-            for fs in final_state:
-                if isinstance(fs, dict):
-                    if fs.get('objectType'):
-                        extracted_objs.add(str(fs['objectType']).strip())
-                    if isinstance(fs.get('parentReceptacles'), list):
-                        for rec in fs['parentReceptacles']:
-                            if rec:
-                                extracted_objs.add(str(rec).strip())
-        steps = task_data.get('step')
-        if isinstance(steps, list):
-            for s in steps:
-                s_str = str(s).strip()
-                action_match = re.search(
-                    r'^(?:find|pick|turn\s+on|turn\s+off|open|close|put|drop|dirty|clean|fillLiquid|pour|break|slice|use)\s+(.+)$',
-                    s_str, re.IGNORECASE)
-                if action_match:
-                    extracted_objs.add(action_match.group(1).strip())
-        workspace_info = ", ".join(sorted(extracted_objs)) if extracted_objs else "N/A"
-    else:
-        original_label = "N/A"
-        instruction = "N/A"
-        workspace_info = "N/A"
+        scene_name = task_data.get('scene_name', 'N/A')
+        workspace_info = f"Scene: {scene_name}"
+        if scene_name != 'N/A':
+            try:
+                with open("thor_workspaces.json", "r") as f:
+                    workspace_dict = json.load(f)
+                    workspace_desc = workspace_dict.get(scene_name, "")
 
-    # Expanded row data including Instruction and Workspace Info (Columns A through K)
+                    # Search for the 'Objects present in the scene:' section up to the next double newline or end of text
+                    match = re.search(r'(Objects present in the scene:.*?)(?:\n\s*\n|\Z)', workspace_desc,
+                                      re.IGNORECASE | re.DOTALL)
+                    if match:
+                        workspace_info = match.group(1).strip()
+                    else:
+                        # Fallback if the exact phrase varies slightly
+                        lines = workspace_desc.split('\n')
+                        obj_lines = [line.strip() for line in lines if 'object' in line.lower()]
+                        workspace_info = " | ".join(obj_lines) if obj_lines else workspace_desc[:300]
+            except Exception:
+                pass
+
+    task_id = task_data.get('id', 'N/A')
+
     row_data = [
         str(annotator_id), str(dataset), str(task_id), str(original_label),
         str(instruction), str(workspace_info),
