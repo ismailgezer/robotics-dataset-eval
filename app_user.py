@@ -330,7 +330,7 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
              "Numeric: Underspecifying quantity.",
              "Preference: Lacking user preference or necessary environmental context.",
              "Referential: Ambiguities where the reference is subtle.",
-             "Commonsense: Tasks that are feasible to perform and which pose no danger when executed yet run counter to common sense."
+             "Commonsense: Tasks that are feasible to carry out, but that run counter to common sense, regardless of whether they pose a danger when performed."
         ]
 
     clarity_val = st.radio(
@@ -492,6 +492,7 @@ def main():
     if st.sidebar.button("Start / Resume Evaluation", disabled=not annotator_id):
         gc = init_connection()
         existing_df = get_existing_evaluations(gc)
+        st.session_state.existing_df = existing_df
         
         st.session_state.annotator_id = annotator_id
         st.session_state.is_trained = check_user_trained(existing_df, annotator_id)
@@ -560,6 +561,35 @@ def main():
         render_task_display(current_task, dataset_choice)
         st.divider()
 
+        # --- Pre-populate widget session state from saved data if returning to this task ---
+        clarity_key = f"clarity_{task_id}"
+        ambig_key = f"ambig_type_{task_id}"
+        feas_key = f"feas_{task_id}"
+        safe_key = f"safe_{task_id}"
+        comment_key = f"comment_{task_id}"
+
+        if clarity_key not in st.session_state and 'existing_df' in st.session_state:
+            df = st.session_state.existing_df
+            if not df.empty:
+                match = df[
+                    (df['Annotator_ID'].astype(str) == str(st.session_state.annotator_id)) &
+                    (df['Dataset'].astype(str) == str(dataset_choice)) &
+                    (df['Task_ID'].astype(str) == str(task_id))
+                    ]
+                if not match.empty:
+                    row = match.iloc[0]
+                    st.session_state[clarity_key] = str(row.get('Clarity', 'Clear & Actionable'))
+
+                    ambig_str = str(row.get('Ambiguity_Type', 'N/A'))
+                    if ambig_str and ambig_str != 'N/A':
+                        st.session_state[ambig_key] = [x.strip() for x in ambig_str.split(',')]
+                    else:
+                        st.session_state[ambig_key] = []
+
+                    st.session_state[feas_key] = str(row.get('Feasibility', 'Feasible'))
+                    st.session_state[safe_key] = str(row.get('Safety', 'Safe'))
+                    st.session_state[comment_key] = str(row.get('Comments', ''))
+
         # 2. Render Evaluation Widgets
         st.subheader("Evaluate This Task")
         eval_inputs = render_evaluation_widgets(task_id)
@@ -579,6 +609,24 @@ def main():
                 )
 
                 if success:
+                    new_row = {
+                        'Annotator_ID': str(st.session_state.annotator_id),
+                        'Dataset': str(dataset_choice),
+                        'Task_ID': str(task_id),
+                        'Clarity': str(eval_inputs["clarity"]),
+                        'Ambiguity_Type': str(eval_inputs["ambiguity_type_str"]),
+                        'Feasibility': str(eval_inputs["feasibility"]),
+                        'Safety': str(eval_inputs["safety"]),
+                        'Comments': str(eval_inputs["comments"])
+                    }
+                    if 'existing_df' in st.session_state and not st.session_state.existing_df.empty:
+                        df = st.session_state.existing_df
+                        # Drop old entry if exists, then append new
+                        df = df[~((df['Annotator_ID'].astype(str) == str(st.session_state.annotator_id)) &
+                                  (df['Dataset'].astype(str) == str(dataset_choice)) &
+                                  (df['Task_ID'].astype(str) == str(task_id)))]
+                        st.session_state.existing_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
                     st.session_state.current_idx[dataset_choice] += 1
                     st.session_state.scroll_to_top = True
                     st.rerun()
