@@ -86,10 +86,10 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
             try:
                 with open("thor_workspaces.json", "r") as f:
                     workspace_dict = json.load(f)
-                workspace_desc = workspace_dict.get(scene_name, "")
-                raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
+                    workspace_desc = workspace_dict.get(scene_name, "")
+                    raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
                                          re.IGNORECASE)
-                workspace_objects = [obj for obj, _ in raw_matches]
+                    workspace_objects = [obj for obj, _ in raw_matches]
             except Exception:
                 pass
         workspace_info = ", ".join(workspace_objects) if workspace_objects else f"Scene: {scene_name}"
