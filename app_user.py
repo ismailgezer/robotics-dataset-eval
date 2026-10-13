@@ -108,6 +108,8 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
                     extracted_objs.add(action_match.group(1).strip())
         workspace_info = ", ".join(sorted(extracted_objs)) if extracted_objs else "N/A"
     else:
+        original_label = "N/A"
+        instruction = "N/A"
         workspace_info = "N/A"
 
     # Expanded row data including Instruction and Workspace Info (Columns A through K)
