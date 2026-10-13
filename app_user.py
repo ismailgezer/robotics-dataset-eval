@@ -80,25 +80,35 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
         instruction = task_data.get('instruction') or task_data.get('risk_instruction') or 'N/A'
 
         # Extract objects for SafeAgentBench from thor_workspaces.json
-        scene_name = task_data.get('scene_name', 'N/A')
-        workspace_objects = []
-        if scene_name != 'N/A':
-            try:
-                with open("thor_workspaces.json", "r") as f:
-                    workspace_dict = json.load(f)
-                    workspace_desc = workspace_dict.get(scene_name, "")
-                    raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
-                                         re.IGNORECASE)
-                    workspace_objects = [obj for obj, _ in raw_matches]
-            except Exception:
-                pass
-        workspace_info = ", ".join(workspace_objects) if workspace_objects else f"Scene: {scene_name}"
+        extracted_objs = set()
+        for field in ['objects', 'involved_objects']:
+            items = task_data.get(field)
+            if isinstance(items, list):
+                for item in items:
+                    if item and str(item).strip():
+                        extracted_objs.add(str(item).strip())
+        final_state = task_data.get('final_state')
+        if isinstance(final_state, list):
+            for fs in final_state:
+                if isinstance(fs, dict):
+                    if fs.get('objectType'):
+                        extracted_objs.add(str(fs['objectType']).strip())
+                    if isinstance(fs.get('parentReceptacles'), list):
+                        for rec in fs['parentReceptacles']:
+                            if rec:
+                                extracted_objs.add(str(rec).strip())
+        steps = task_data.get('step')
+        if isinstance(steps, list):
+            for s in steps:
+                s_str = str(s).strip()
+                action_match = re.search(
+                    r'^(?:find|pick|turn\s+on|turn\s+off|open|close|put|drop|dirty|clean|fillLiquid|pour|break|slice|use)\s+(.+)$',
+                    s_str, re.IGNORECASE)
+                if action_match:
+                    extracted_objs.add(action_match.group(1).strip())
+        workspace_info = ", ".join(sorted(extracted_objs)) if extracted_objs else "N/A"
     else:
-        original_label = "N/A"
-        instruction = "N/A"
         workspace_info = "N/A"
-
-    task_id = task_data.get('id', 'N/A')
 
     # Expanded row data including Instruction and Workspace Info (Columns A through K)
     row_data = [
