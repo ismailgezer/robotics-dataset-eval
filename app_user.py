@@ -549,63 +549,14 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, inst
 
 
 # --- Sign-in ---
-REGISTER, RETURNING = core.REGISTER, core.RETURNING
+def sign_in(typed_id, subset, training_version):
+    """Check the ID, read the sheet, restore progress. Returns an error message or None.
 
-
-def registration_worksheet(sh):
-    try:
-        return sh.worksheet(core.REG_SHEET)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=core.REG_SHEET, rows=1000, cols=len(core.REG_HEADER))
-        ws.append_row(core.REG_HEADER, value_input_option="RAW")
-        return ws
-
-
-def authenticate(sh, annotator_id, pin, pin_again, mode):
-    """Register a new ID or check a returning user's PIN. Returns an error message or None."""
-    try:
-        ws = registration_worksheet(sh)
-        reg = core.find_registration(read_values(ws), annotator_id)
-        if mode == REGISTER:
-            if reg is not None:
-                return core.TAKEN
-            error = core.validate_pin(pin)
-            if error:
-                return error
-            if str(pin).strip() != str(pin_again or "").strip():
-                return "The two PINs differ."
-            row = core.registration_row(annotator_id, pin)
-            ws.append_row(row, value_input_option="RAW")
-            # Two registrations of one ID at the same moment: the first row wins.
-            first = core.find_registration(read_values(ws), annotator_id)
-            return None if first is not None and first[1] == row[1] else core.TAKEN
-        if reg is None or not core.verify_pin(pin, reg[1]):
-            return core.NOT_RECOGNISED
-        return None
-    except core.SheetError:
-        raise
-    except Exception as e:
-        log.exception("the registrations worksheet failed")
-        raise core.SheetError("registration failed") from e
-
-
-def sign_in(typed_id, pin, pin_again, study_code, mode, subset, training_version):
-    """Check the study code, register or check the PIN, read the sheet, restore progress.
-
-    Returns an error message or None. Nothing is read from the sheet before the study code
-    and the ID format are checked."""
-    error = core.check_study_code(secret("STUDY_CODE"), study_code)
-    if error:
-        return error
+    Nothing is read from the sheet before the ID format is checked."""
     annotator_id, error = core.validate_id(typed_id)
     if error:
         return error
-    if mode == RETURNING and not str(pin or "").strip():
-        return core.NOT_RECOGNISED
     sh = open_spreadsheet()
-    error = authenticate(sh, annotator_id, pin, pin_again, mode)
-    if error:
-        return error
     ws = sh.sheet1
     values = read_values(ws)
     ensure_header(ws, values)
@@ -613,6 +564,7 @@ def sign_in(typed_id, pin, pin_again, study_code, mode, subset, training_version
     st.session_state.annotator_id = annotator_id
     st.session_state.is_trained = core.training_done(values, annotator_id, training_version)
     st.session_state.answers = {tid: answers_from_row(row) for (_, tid), row in labeled.items()}
+    st.session_state.welcome = core.welcome_message(annotator_id, len(st.session_state.answers))
     st.session_state.order = core.annotator_order(subset, annotator_id)
     st.session_state.pos = None
     st.session_state.logged_blocks = set()
@@ -640,20 +592,11 @@ def main():
     # --- Sidebar Setup ---
     st.sidebar.header("Annotator Control Panel")
     if not st.session_state.get('annotator_id'):
-        mode = st.sidebar.radio("Sign-in", [RETURNING, REGISTER], key="login_mode")
-        typed_code = st.sidebar.text_input("Study code:", type="password", key="login_study_code")
-        typed_id = st.sidebar.text_input("Your ID:", key="login_id", max_chars=40,
+        typed_id = st.sidebar.text_input("Your ID (first and last name):", key="login_id", max_chars=40,
                                          help=core.ID_RULE)
-        typed_pin = st.sidebar.text_input("PIN:", type="password", key="login_pin",
-                                          help=core.PIN_RULE if mode == REGISTER else None)
-        typed_pin2 = (st.sidebar.text_input("Repeat the PIN:", type="password", key="login_pin2")
-                      if mode == REGISTER else None)
-        if mode == REGISTER:
-            st.sidebar.caption("Remember your ID and PIN: you need both to continue later.")
-        label = "Register and start" if mode == REGISTER else "Start / Resume Evaluation"
-        if st.sidebar.button(label, disabled=not typed_id.strip(), key="login_btn"):
+        if st.sidebar.button("Start / Resume Evaluation", disabled=not typed_id.strip(), key="login_btn"):
             try:
-                message = sign_in(typed_id, typed_pin, typed_pin2, typed_code, mode, subset, training_version)
+                message = sign_in(typed_id, subset, training_version)
             except core.SheetError:
                 st.error(SHEET_ERROR)
                 st.stop()
@@ -661,11 +604,13 @@ def main():
                 st.sidebar.error(message)
             else:
                 st.rerun()
-        st.info("👈 Enter the study code, then sign in with your ID and PIN (first visit: register) in the sidebar.")
+        st.info("👈 Enter your first and last name as your ID in the sidebar, and use the same one every time.")
         return
 
     annotator_id = st.session_state.annotator_id
     st.sidebar.success(f"Signed in as **{annotator_id}**")
+    if st.session_state.get("welcome"):
+        st.info(f"👋 {st.session_state.welcome}. If this is not you, sign out and use your own ID.")
     if st.sidebar.button("Sign out", key="logout_btn"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
@@ -753,6 +698,7 @@ def main():
         answers[task_id] = {k: eval_inputs[k] for k in
                             ("clarity", "ambiguity_types", "feasibility", "safety", "comments")}
         st.toast("Response saved to database!", icon="✅")
+        st.session_state.welcome = None
         st.session_state.pos = first_open(flat, answers)
         st.rerun()
 

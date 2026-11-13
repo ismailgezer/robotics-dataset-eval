@@ -1,4 +1,4 @@
-"""The repository (public) must never hold keys, the study code, PINs, the Sheet URL or labels.
+"""The repository (public) must never hold keys, the Sheet URL or labels.
 
 Checks the tracked files and .gitignore, and that the app writes no local files: answers go
 only to the Google Sheet, credentials and access codes come only from st.secrets.
@@ -27,7 +27,6 @@ SECRET_PATTERNS = {
     "Google API key": "AI" + r"za[0-9A-Za-z_\-]{35}",
     "Sheet URL": r"docs\.google\.com/" + "spreadsheets/d/",
     "access-code table": r"(?m)^\s*\[" + r"annotators\]",
-    "study code": r"(?m)^\s*(?:export\s+)?STUDY" + r"_CODE\s*[=:]",
 }
 DATA_OK = {"ambik_test_900.csv"}  # dataset file, not labels
 
@@ -80,17 +79,15 @@ class AppWritesNoFiles(unittest.TestCase):
     def test_secrets_only_from_st_secrets(self):
         app = (ROOT / "app_user.py").read_text(encoding="utf-8")
         self.assertNotIn("os.environ", app)
-        self.assertEqual(re.findall(r'secret\("STUDY_CODE"\)', app), ['secret("STUDY_CODE")'])
-        self.assertIn('check_study_code(secret("STUDY_CODE")', app)  # only compared, never shown
+        self.assertEqual(set(re.findall(r'secret\("(\w+)"\)', app)), {"GOOGLE_CREDENTIALS", "SHEET_URL"})
+        self.assertNotIn("st.secrets[", app.replace('st.secrets[name]', ''))   # only through secret()
 
-    def test_study_code_pattern_catches_assignments(self):
-        pat = SECRET_PATTERNS["study code"]
-        for text in ('STUDY' + '_CODE = "abc"', '  STUDY' + "_CODE='abc'", 'export STUDY' + '_CODE=abc',
-                     'STUDY' + '_CODE: abc'):
-            self.assertRegex(text, pat)
-        self.assertNotRegex('secret("STUDY' + '_CODE")', pat)
-        self.assertNotRegex('at.secrets["STUDY' + '_CODE"] = study_code', pat)
-
+    def test_no_sign_in_secrets_or_registrations(self):
+        # Sign-in is an ID only: no study code, no PINs, no registrations worksheet.
+        for name in ("app_user.py", "rde_core.py"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            for word in ("STUDY" + "_CODE", "registrations", "pbkdf2", "PIN"):
+                self.assertNotIn(word, text, (name, word))
 
 if __name__ == "__main__":
     unittest.main()

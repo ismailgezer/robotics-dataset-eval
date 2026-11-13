@@ -43,38 +43,15 @@ KITCHEN = ("Assume a standard kitchen: common appliances (stove, oven, microwave
 
 
 class TestSignInRules(unittest.TestCase):
-    def test_study_code(self):
-        self.assertIsNone(core.check_study_code("Study-42", " Study-42 "))
-        self.assertEqual(core.check_study_code("Study-42", "study-42"), core.WRONG_STUDY_CODE)
-        self.assertEqual(core.check_study_code("Study-42", ""), core.WRONG_STUDY_CODE)
-        for missing in (None, "", "  "):
-            self.assertEqual(core.check_study_code(missing, "anything"), core.NO_STUDY_CODE)
-
     def test_id_rules(self):
         self.assertEqual(core.validate_id("  Jane Doe_1-X "), ("jane doe_1-x", None))
         self.assertEqual(core.validate_id("a" * 40)[1], None)
         for bad in ("", "   ", "a" * 41, "jane!", "jané", "a/b", "a.b"):
             self.assertEqual(core.validate_id(bad)[1], core.ID_RULE, bad)
 
-    def test_pin_rules(self):
-        self.assertIsNone(core.validate_pin("1234"))
-        for bad in ("", "123", "  12 ", "x" * 129):
-            self.assertEqual(core.validate_pin(bad), core.PIN_RULE)
-
-    def test_pin_hash(self):
-        h1, h2 = core.hash_pin("4821"), core.hash_pin("4821")
-        self.assertNotEqual(h1, h2)                    # salted
-        self.assertNotIn("4821", h1.split("$", 3)[3])
-        scheme, iterations, salt, digest = h1.split("$")
-        self.assertEqual((scheme, int(iterations), len(salt), len(digest)), ("pbkdf2_sha256", 200000, 32, 64))
-        self.assertTrue(core.verify_pin("4821", h1) and core.verify_pin(" 4821 ", h2))
-        for wrong, stored in (("4822", h1), ("", h1), ("4821", ""), ("4821", "garbage"), ("4821", "md5$1$00$00")):
-            self.assertFalse(core.verify_pin(wrong, stored))
-
-    def test_first_registration_wins(self):
-        values = [core.REG_HEADER, ["eve", core.hash_pin("first"), "t", "v2"], ["eve", core.hash_pin("second"), "t", "v2"]]
-        self.assertTrue(core.verify_pin("first", core.find_registration(values, "eve")[1]))
-        self.assertIsNone(core.find_registration(values, "adam"))
+    def test_welcome_message(self):
+        self.assertEqual(core.welcome_message("jane doe", 3), "Welcome back, jane doe: 3 items done")
+        self.assertIsNone(core.welcome_message("jane doe", 0))
 
 
 class TestSheetRows(unittest.TestCase):

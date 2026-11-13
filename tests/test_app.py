@@ -19,7 +19,6 @@ import fake_sheet  # noqa: E402
 import rde_core as core  # noqa: E402
 
 URL = "fake://results-sheet"
-STUDY = "study-code-for-tests"
 V1_HEADER = ["Annotator_ID", "Dataset", "Task_ID", "Original_Label", "Instruction", "Workspace",
              "Clarity", "Ambiguity_Type", "Feasibility", "Safety", "Comments"]
 TRAINING_VERSION, TRAINING = core.load_training(ROOT / "training_tasks.json")
@@ -31,24 +30,16 @@ def setUpModule():
     os.chdir(ROOT)  # the app opens its data files relative to the working directory
 
 
-def new_app(study_code=STUDY):
+def new_app():
     at = AppTest.from_file(str(ROOT / "app_user.py"), default_timeout=180)
     at.secrets["GOOGLE_CREDENTIALS"] = "{}"
     at.secrets["SHEET_URL"] = URL
-    if study_code is not None:
-        at.secrets["STUDY_CODE"] = study_code
     return at.run()
 
 
-def login(at, annotator, pin, register=True, code=STUDY, pin_again=None):
-    """Fill the sidebar sign-in form and press the button (register=True: first visit)."""
-    at.radio(key="login_mode").set_value(core.REGISTER if register else core.RETURNING).run()
-    at.text_input(key="login_study_code").input(code)
-    at.text_input(key="login_id").input(annotator)
-    at.text_input(key="login_pin").input(pin)
-    if register:
-        at.text_input(key="login_pin2").input(pin if pin_again is None else pin_again)
-    at.run()
+def login(at, annotator):
+    """Type the ID into the sidebar and press the button."""
+    at.text_input(key="login_id").input(annotator).run()
     return at.button(key="login_btn").click().run()
 
 
@@ -115,118 +106,71 @@ def signed_in(at):
 
 
 class TestSignIn(AppCase):
-    def registrations(self):
-        ws = self.book.sheets.get(core.REG_SHEET)
-        return ws.values if ws else None
-
-    def test_registration(self):
-        at = login(new_app(), "  Jane Doe-1 ", "4821")
+    def test_id_is_normalized_and_needs_nothing_else(self):
+        at = login(new_app(), "  Jane Doe-1 ")
         self.assertTrue(signed_in(at))
-        self.assertEqual(at.session_state["annotator_id"], "jane doe-1")    # trimmed, lowercased
-        reg = self.registrations()
-        self.assertEqual(reg[0], core.REG_HEADER)                            # worksheet created
-        self.assertEqual(len(reg), 2)
-        self.assertEqual(reg[1][0], "jane doe-1")
-        self.assertTrue(reg[1][1].startswith("pbkdf2_sha256$"))
-        self.assertTrue(core.verify_pin("4821", reg[1][1]))
-        self.assertRegex(reg[1][2], r"^\d{4}-\d{2}-\d{2}T")
-        for ws in self.book.sheets.values():                                 # the PIN is stored nowhere
-            self.assertFalse(any("4821" in cell for row in ws.values for cell in row if cell != reg[1][1]))
-        self.assertTrue(any("Calibration Task 1" in m.value for m in at.markdown))  # then training
+        self.assertEqual(at.session_state["annotator_id"], "jane doe-1")
+        self.assertEqual(at.sidebar.error, [])
+        self.assertFalse(any("Welcome back" in i for i in texts(at.info)))   # new ID: no welcome
+        self.assertTrue(any("Calibration Task 1" in m.value for m in at.markdown))
 
-    def test_returning_user(self):
-        a = do_training(self, login(new_app(), "alice", "pin-alice"))
-        done = submit_current(a)
-        r = login(new_app(), "ALICE", "pin-alice", register=False)
-        self.assertTrue(signed_in(r))
+    def test_id_rules(self):
+        for bad in ("jane!", "o'brien", "a/b"):
+            at = login(new_app(), bad)
+            self.assertEqual(texts(at.sidebar.error), [core.ID_RULE], bad)
+            self.assertFalse(signed_in(at))
+        self.assertEqual(self.book.reads, 0)          # nothing is read before the ID is checked
+        self.assertEqual(new_app().text_input(key="login_id").proto.max_chars, 40)
+
+    def test_welcome_back_shows_items_done(self):
+        a = do_training(self, login(new_app(), "alice"))
+        submit_current(a)
+        submit_current(a)
+        r = login(new_app(), "Alice ")
         self.assertTrue(r.session_state["is_trained"])
-        self.assertIn(done, r.session_state["answers"])
-        self.assertEqual(len(self.registrations()), 2)                       # no second registration
+        self.assertTrue(any("Welcome back, alice: 2 items done" in i for i in texts(r.info)))
+        submit_current(r)                             # the message goes away after the next answer
+        self.assertFalse(any("Welcome back" in i for i in texts(r.info)))
 
-    def test_wrong_pin_and_unknown_id(self):
-        login(new_app(), "alice", "pin-alice")
-        for who, pin in (("alice", "pin-alicE"), ("alice", ""), ("mallory", "pin-alice")):
-            at = login(new_app(), who, pin, register=False)
-            self.assertEqual(texts(at.sidebar.error), [core.NOT_RECOGNISED], (who, pin))
-            self.assertFalse(signed_in(at))
-
-    def test_taken_id(self):
-        login(new_app(), "alice", "pin-alice")
-        at = login(new_app(), "Alice ", "other-pin")
-        self.assertEqual(texts(at.sidebar.error),
-                         ["This ID is already registered; choose another or enter your PIN."])
-        self.assertFalse(signed_in(at))
-        self.assertEqual(len(self.registrations()), 2)
-        self.assertTrue(core.verify_pin("pin-alice", self.registrations()[1][1]))
-
-    def test_missing_or_wrong_study_code(self):
-        for app, code, message in ((new_app(study_code=None), STUDY, core.NO_STUDY_CODE),
-                                   (new_app(study_code=""), "", core.NO_STUDY_CODE),
-                                   (new_app(), "wrong-code", core.WRONG_STUDY_CODE)):
-            at = login(app, "alice", "pin-alice", code=code)
-            self.assertEqual(texts(at.sidebar.error), [message])
-            self.assertFalse(signed_in(at))
-        self.assertEqual(self.book.reads, 0)          # nothing is read before the study code is checked
-        self.assertIsNone(self.registrations())
-
-    def test_v1_id_registers_once(self):
+    def test_v1_id(self):
         v1 = [["Carol", "SaGC", "5", "0", "goal", "ws", core.CLARITY_OPTIONS[0], "N/A",
                core.FEASIBILITY_OPTIONS[0], core.SAFETY_OPTIONS[0], "v1"],
               ["Carol", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 7 + ["Completed calibration"]]
         self.sheet.values += [list(r) for r in v1]
-        at = login(new_app(), "carol", "pin-carol")
+        at = login(new_app(), "carol")
         self.assertTrue(signed_in(at))
         self.assertFalse(at.session_state["is_trained"])        # the v1 marker does not count for t3
         self.assertEqual(at.session_state["answers"], {})       # v1 rows are not v2 answers
+        self.assertFalse(any("Welcome back" in i for i in texts(at.info)))
+        do_training(self, at)
+        submit_current(at)
         self.assertEqual(self.sheet.values[1:3], v1)             # v1 rows untouched
-        again = login(new_app(), "carol", "another-pin")         # only once
-        self.assertEqual(texts(again.sidebar.error), [core.TAKEN])
 
-    def test_id_and_pin_rules(self):
-        for who, pin, pin_again, message in (("bad!id", "4821", None, core.ID_RULE),
-                                             ("dave", "123", None, core.PIN_RULE),
-                                             ("dave", "4821", "4812", "The two PINs differ.")):
-            at = login(new_app(), who, pin, pin_again=pin_again)
-            self.assertEqual(texts(at.sidebar.error), [message], who)
-            self.assertFalse(signed_in(at))
-        self.assertEqual(self.registrations()[1:], [])
-        # longer IDs cannot be typed (the field holds 40 characters; core.validate_id also rejects them)
-        self.assertEqual(new_app().text_input(key="login_id").proto.max_chars, 40)
-
-    def test_simultaneous_registration_first_wins(self):
-        import app_user
-        login(new_app(), "zoe", "pin-zoe-1")       # creates the worksheet
-        ws = self.book.sheets[core.REG_SHEET]
-        del ws.values[1:]
-        original = ws.get_all_values
-        calls = []
-
-        def racing_read(*a, **k):                  # another session registers "eve" between our read and append
-            values = original()
-            if not calls:
-                ws.values.append(core.registration_row("eve", "their-pin"))
-            calls.append(1)
-            return values
-        ws.get_all_values = racing_read
-        self.assertEqual(app_user.authenticate(self.book, "eve", "my-pin", "my-pin", core.REGISTER), core.TAKEN)
-        ws.get_all_values = original
-        self.assertTrue(core.verify_pin("their-pin", core.find_registration(ws.values, "eve")[1]))
+    def test_existing_registrations_tab_left_untouched(self):
+        reg = self.book.add_worksheet("registrations", 10, 4)
+        reg.values = [["Annotator_ID", "PIN_Hash", "Registered_UTC", "Interface_Version"],
+                      ["alice", "pbkdf2_sha256$1$00$00", "2026-11-13T00:00:00Z", "v2"]]
+        before = [list(r) for r in reg.values]
+        a = do_training(self, login(new_app(), "alice"))
+        submit_current(a)
+        self.assertEqual(reg.values, before)
+        self.assertEqual(reg.writes, 0)
 
 
 class TestUnreadableSheet(AppCase):
     def test_read_failure_at_sign_in_stops(self):
         self.book.fail = {"read"}
-        at = login(new_app(), "alice", "pin-alice")
+        at = login(new_app(), "alice")
         self.assertTrue(any("could not be reached" in e for e in texts(at.error)))
         self.assertFalse("annotator_id" in at.session_state and at.session_state["annotator_id"])
 
     def test_open_failure_at_sign_in_stops(self):
         self.book.fail = {"open"}
-        at = login(new_app(), "alice", "pin-alice")
+        at = login(new_app(), "alice")
         self.assertTrue(any("could not be reached" in e for e in texts(at.error)))
 
     def test_write_failure_keeps_item_and_reports(self):
-        at = do_training(self, login(new_app(), "alice", "pin-alice"))
+        at = do_training(self, login(new_app(), "alice"))
         flat, tid = current(at)
         self.book.fail = {"write"}
         answer(at, tid, SIMPLE)
@@ -240,7 +184,7 @@ class TestUnreadableSheet(AppCase):
         self.assertEqual([r[2] for r in self.rows("alice") if r[1] != core.TRAINING_MARKER], [tid])
 
     def test_read_failure_before_write_is_reported(self):
-        at = do_training(self, login(new_app(), "alice", "pin-alice"))
+        at = do_training(self, login(new_app(), "alice"))
         _, tid = current(at)
         answer(at, tid, SIMPLE)
         self.book.fail = {"read"}
@@ -251,7 +195,7 @@ class TestUnreadableSheet(AppCase):
 
 class TestSubmitBlocked(AppCase):
     def test_submit_disabled_until_every_question_answered(self):
-        at = do_training(self, login(new_app(), "alice", "pin-alice"))
+        at = do_training(self, login(new_app(), "alice"))
         _, tid = current(at)
         submit = lambda: at.button(key=f"submit_{tid}")  # noqa: E731
         # nothing preselected
@@ -268,7 +212,7 @@ class TestSubmitBlocked(AppCase):
         self.assertFalse(submit().disabled)
 
     def test_training_check_disabled_until_answered(self):
-        at = login(new_app(), "alice", "pin-alice")
+        at = login(new_app(), "alice")
         t = TRAINING[0]
         self.assertTrue(at.button(key=f"check_btn_{t['id']}").disabled)
         answer(at, f"train_{t['id']}", expected(t))
@@ -278,7 +222,7 @@ class TestSubmitBlocked(AppCase):
 class TestInstructions(AppCase):
     def test_kitchen_rule_in_training_and_live_pages(self):
         line = core.load_instructions(ROOT / "training_tasks.json")[0]
-        at = login(new_app(), "alice", "pin-alice")
+        at = login(new_app(), "alice")
         self.assertTrue(any(line in m.value for m in at.markdown))       # training intro
         do_training(self, at)
         self.assertTrue(any(line in m.value for m in at.markdown))       # live item page
@@ -286,13 +230,13 @@ class TestInstructions(AppCase):
 
 class TestTrainingFeedback(AppCase):
     def test_expected_answers_match_for_every_item(self):
-        do_training(self, login(new_app(), "alice", "pin-alice"))
+        do_training(self, login(new_app(), "alice"))
         marker = [r for r in self.rows("alice") if r[1] == core.TRAINING_MARKER]
         self.assertEqual(len(marker), 1)
         self.assertEqual(marker[0][11:13], [core.INTERFACE_VERSION, TRAINING_VERSION])
 
     def test_wrong_answers_differ_for_every_item(self):
-        do_training(self, login(new_app(), "alice", "pin-alice"), wrong=True)
+        do_training(self, login(new_app(), "alice"), wrong=True)
 
 
 class TestTwoAnnotators(AppCase):
@@ -300,8 +244,8 @@ class TestTwoAnnotators(AppCase):
         v1_row = ["alice", "SaGC", "5", "0", "goal", "ws", core.CLARITY_OPTIONS[0], "N/A",
                   core.FEASIBILITY_OPTIONS[0], core.SAFETY_OPTIONS[0], "v1 comment"]
         self.sheet.values.append(list(v1_row))
-        a = do_training(self, login(new_app(), "alice", "pin-alice"))
-        b = do_training(self, login(new_app(), "bob", "pin-bob"))
+        a = do_training(self, login(new_app(), "alice"))
+        b = do_training(self, login(new_app(), "bob"))
         self.assertEqual(self.sheet.values[0][11:13], core.HEADER_V2)  # L/M headers added
         done_a, done_b = [], []
         for _ in range(3):
@@ -335,12 +279,12 @@ class TestTwoAnnotators(AppCase):
 
 class TestResume(AppCase):
     def test_stop_and_resume_in_a_new_session(self):
-        a = do_training(self, login(new_app(), "alice", "pin-alice"))
+        a = do_training(self, login(new_app(), "alice"))
         ambiguous = {"clarity": core.CLARITY_OPTIONS[3], "ambiguity_types": [core.AMBIGUITY_OPTIONS[6]],
                      "feasibility": core.FEASIBILITY_OPTIONS[2], "safety": core.SAFETY_OPTIONS[2]}
         done = [submit_current(a), submit_current(a), submit_current(a, ambiguous)]
         # a new browser session (the old one is gone)
-        r = login(new_app(), "Alice", "pin-alice", register=False)
+        r = login(new_app(), "Alice")
         self.assertTrue(r.session_state["is_trained"])  # training detected from the sheet
         self.assertFalse(any("Calibration Task" in m.value for m in r.markdown))
         flat, tid = current(r)
@@ -364,7 +308,7 @@ class TestResume(AppCase):
 
     def test_new_training_version_requires_training_again(self):
         self.sheet.values.append(["alice", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 8 + ["v2", "t1"])
-        at = login(new_app(), "alice", "pin-alice")
+        at = login(new_app(), "alice")
         self.assertFalse(at.session_state["is_trained"])
 
 
