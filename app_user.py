@@ -246,148 +246,26 @@ def load_subset_items():
 
 
 # --- Reusable Component 1: Task Display ---
+@st.cache_resource
+def load_thor_workspaces():
+    with open("thor_workspaces.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def render_task_display(task, dataset_choice):
-    """Renders environment, workspace details, object presence check, and instruction prompt."""
+    """Shows the task exactly as the models get it: the workspace text and the instruction, verbatim.
+
+    Nothing the models do not see is shown (no labels, ambiguity types, plans or derived checks)."""
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("Environment & Workspace")
-
-        if dataset_choice == "SaGC":
-            scene = task.get('scene', {})
-            st.write("**Rooms / Floorplan:**", ", ".join(scene.get('floorplan', [])))
-            st.write("**Objects Present:**", ", ".join(scene.get('objects', [])))
-            if 'people' in scene:
-                st.write("**People:**", ", ".join(scene.get('people', [])))
-
-        elif dataset_choice == "AmbiK":
-            env = task.get('Environment Short') or task.get('environment_short') or task.get(
-                'Environment Full') or "N/A"
-            st.write("**Kitchen Items:**", env)
-
-        elif dataset_choice == "SafeAgentBench":
-            scene_name = task.get('scene_name', 'N/A')
-            st.write(f"**Scene Name:** {scene_name}")
-
-            # Load Workspace Context
-            workspace_desc = "Description not found."
-            if scene_name != 'N/A':
-                try:
-                    with open("thor_workspaces.json", "r") as f:
-                        workspace_dict = json.load(f)
-                    workspace_desc = workspace_dict.get(scene_name, "Description not found.")
-                except FileNotFoundError:
-                    workspace_desc = "thor_workspaces.json file not found."
-
-            # Parse workspace objects & counts into map
-            ws_objects_map = {}
-            raw_matches = re.findall(r'([A-Za-z0-9_-]+)\s*\((?:instances?|count)?:\s*(\d+)\)', workspace_desc,
-                                     re.IGNORECASE)
-            for obj_name, count in raw_matches:
-                count_val = int(count)
-                norm_plain = re.sub(r'[^a-z0-9]', '', obj_name.lower())
-                ws_objects_map[norm_plain] = (obj_name, count_val)
-
-            ws_normalized_text = re.sub(r'[^a-z0-9]', '', workspace_desc.lower())
-
-            def normalize_obj_key(s):
-                s_clean = re.sub(r'^(dirty|clean|broken|open|opened|closed|turned on|turned off|lit|unlit)\s+', '',
-                                 str(s).strip(), flags=re.IGNORECASE)
-                return re.sub(r'[^a-z0-9]', '', s_clean.lower())
-
-            # Extract Target Objects
-            extracted_targets = set()
-
-            for field in ['objects', 'involved_objects']:
-                items = task.get(field)
-                if isinstance(items, list):
-                    for item in items:
-                        if item and str(item).strip():
-                            extracted_targets.add(str(item).strip())
-
-            final_state = task.get('final_state')
-            if isinstance(final_state, list):
-                for fs in final_state:
-                    if isinstance(fs, dict):
-                        if fs.get('objectType'):
-                            extracted_targets.add(str(fs['objectType']).strip())
-                        if isinstance(fs.get('parentReceptacles'), list):
-                            for receptacle in fs['parentReceptacles']:
-                                if receptacle:
-                                    extracted_targets.add(str(receptacle).strip())
-
-            steps = task.get('step')
-            if isinstance(steps, list):
-                for s in steps:
-                    s_str = str(s).strip()
-                    action_match = re.search(
-                        r'^(?:find|pick|turn\s+on|turn\s+off|open|close|put|drop|dirty|clean|fillLiquid|pour|break|slice|use)\s+(.+)$',
-                        s_str, re.IGNORECASE)
-                    if action_match:
-                        extracted_targets.add(action_match.group(1).strip())
-
-            instruction_combined = (
-                        str(task.get('instruction') or '') + " " + str(task.get('risk_instruction') or '')).lower()
-            for norm_key, (raw_name, _) in ws_objects_map.items():
-                raw_spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', raw_name).lower()
-                if raw_spaced in instruction_combined or raw_name.lower() in instruction_combined:
-                    extracted_targets.add(raw_name)
-
-            if extracted_targets:
-                st.write("**Object Presence Check:**")
-                unique_targets = {}
-                for tgt in extracted_targets:
-                    norm_k = normalize_obj_key(tgt)
-                    if norm_k not in unique_targets:
-                        unique_targets[norm_k] = tgt
-
-                for norm_k, display_tgt in sorted(unique_targets.items(), key=lambda x: x[1]):
-                    match_info = ws_objects_map.get(norm_k)
-                    if not match_info:
-                        if norm_k.endswith('s') and norm_k[:-1] in ws_objects_map:
-                            match_info = ws_objects_map.get(norm_k[:-1])
-                        elif norm_k + 's' in ws_objects_map:
-                            match_info = ws_objects_map.get(norm_k + 's')
-
-                    is_in_workspace = False
-                    found_count = None
-
-                    if match_info:
-                        is_in_workspace = True
-                        _, found_count = match_info
-                    else:
-                        if norm_k in ws_normalized_text or (norm_k.endswith('s') and norm_k[:-1] in ws_normalized_text):
-                            is_in_workspace = True
-                            count_match = re.search(rf'{re.escape(display_tgt)}\s*\((?:instances?|count)?:\s*(\d+)\)',
-                                                    workspace_desc, re.IGNORECASE)
-                            if count_match:
-                                found_count = int(count_match.group(1))
-
-                    if is_in_workspace:
-                        if found_count is not None:
-                            st.markdown(f"- ✅ **{display_tgt}** is present (Instances: {found_count})")
-                        else:
-                            st.markdown(f"- ✅ **{display_tgt}** is present in the scene")
-                    else:
-                        st.markdown(f"- ❌ **{display_tgt}** was NOT found in the scene")
-            else:
-                st.write("**Object Presence Check:** No task-specific objects identified.")
-
-            with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
-                st.code(workspace_desc, language="text")
+        st.code(core.context_text(task, dataset_choice, load_thor_workspaces()), language=None, wrap_lines=True)
 
     with col2:
         st.subheader("Command / Instruction")
-        if dataset_choice == "SaGC":
-            st.success(f"**Goal:** {task.get('goal', 'N/A')}")
-            st.write(f"**Task Category:** {task.get('task', 'N/A')}")
-        elif dataset_choice == "AmbiK":
-            instr = task.get('eval_instruction') or task.get('instruction') or task.get('Ambiguous Task') or task.get(
-                'Unambiguous Direct') or 'N/A'
-            st.success(f"**Instruction:** {instr}")
-        elif dataset_choice == "SafeAgentBench":
-            instr = task.get('instruction') or task.get('risk_instruction') or 'N/A'
-            st.success(f"**Instruction:** {instr}")
+        label = "Goal" if dataset_choice == "SaGC" else "Instruction"
+        st.success(f"**{label}:** {core.instruction_text(task, dataset_choice)}")
 
 
 # --- Reusable Component 2: Evaluation Form Widgets ---
@@ -469,16 +347,10 @@ def answers_from_row(row):
 
 
 # --- Training / Calibration Session Module ---
-def render_instructions(instructions):
-    for line in instructions:
-        st.markdown(f"📌 {line}")
-
-
-def render_training_module(sh, annotator_id, training_version, train_tasks, instructions=()):
+def render_training_module(sh, annotator_id, training_version, train_tasks):
     """Calibration session with the same display and questions as the live evaluation."""
     st.info(
         "🎓 **Annotator Calibration Session**: Complete these benchmark tasks to align with evaluation standards before proceeding to live tasks.")
-    render_instructions(instructions)
 
     if 'train_idx' not in st.session_state:
         st.session_state.train_idx = 0
@@ -585,7 +457,6 @@ def main():
     try:
         subset, items = load_subset_items()
         training_version, train_tasks = core.load_training(TRAINING_FILE)
-        instructions = core.load_instructions(TRAINING_FILE)
         targets = core.load_targets(STUDY_CONFIG)
     except Exception:
         log.exception("loading the task files failed")
@@ -627,7 +498,7 @@ def main():
 
     # Routing: Calibration vs. Live Evaluation Queue
     if not st.session_state.is_trained:
-        render_training_module(sh, annotator_id, training_version, train_tasks, instructions)
+        render_training_module(sh, annotator_id, training_version, train_tasks)
         return
 
     order = st.session_state.order
@@ -675,7 +546,6 @@ def main():
         heading += f" · optional extra items: {extra}"
     st.markdown(heading)
     st.caption("You can stop at any time or switch datasets; your answers are saved and you continue where you left off.")
-    render_instructions(instructions)
 
     # Navigation Bar
     nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
@@ -710,6 +580,8 @@ def main():
             eval_inputs["feasibility"], eval_inputs["safety"],
             eval_inputs["comments"], annotator_id, training_version
         )
+        # column F: the workspace text the annotator saw (the models' context)
+        row[core.COL["Workspace"]] = core.context_text(current_task, dataset_choice, load_thor_workspaces())
         try:
             write_row(sh, row)
         except core.SheetError:

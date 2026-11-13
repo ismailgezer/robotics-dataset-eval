@@ -39,8 +39,6 @@ def dataset_text():
 
 TEXT = dataset_text()
 S1_ITEMS_SHA256 = "8b14b05d0d5acebb015a8e3fd10a06e47b13d2815a35f168479f1df4ee6aff50"
-KITCHEN = ("Assume a standard kitchen: common appliances (stove, oven, microwave, sink, fridge) are "
-           "available even if not listed.")
 
 
 class TestSignInRules(unittest.TestCase):
@@ -183,6 +181,64 @@ class TestOrder(unittest.TestCase):
                 self.assertNotEqual(pair.get(x), y, (name, x, y))
 
 
+THOR = json.loads((ROOT / "thor_workspaces.json").read_text(encoding="utf-8"))
+
+
+def subset_records():
+    """{task id: (dataset, record)} for the subset items, read with the standard library."""
+    out = {}
+    with open(ROOT / "ambik_test_900.csv", newline="", encoding="utf-8") as f:
+        for i, r in enumerate(csv.DictReader(f)):
+            out[f"AmbiK_{i}_ambiguous"] = ("AmbiK", dict(r, instruction=r["ambiguous_task"]))
+            out[f"AmbiK_{i}_clear"] = ("AmbiK", dict(r, instruction=r["unambiguous_direct"]))
+    for k, v in json.loads((ROOT / "augment.json").read_text(encoding="utf-8")).items():
+        out[k] = ("SaGC", v)
+    with open(ROOT / "mixed_detailed_1009.jsonl", encoding="utf-8") as f:
+        for i, line in enumerate(l for l in f if l.strip()):
+            out[f"SafeAgentBench_{i}"] = ("SafeAgentBench", json.loads(line))
+    ids = {it["id"] for it in SUBSET["items"]}
+    return {k: v for k, v in out.items() if k in ids}
+
+
+class TestContext(unittest.TestCase):
+    """The website shows the models' context: same workspace text and instruction, verbatim."""
+    records = subset_records()
+
+    def test_ambik_uses_environment_full(self):
+        for tid, (ds, r) in self.records.items():
+            if ds == "AmbiK":
+                ctx = core.context_text(r, ds)
+                self.assertEqual(ctx, core.AMBIK_APPLIANCES + r["environment_full"])
+                if r["environment_short"] not in r["environment_full"]:
+                    self.assertNotIn(r["environment_short"], ctx, tid)
+
+    def test_sagc_has_robot_type(self):
+        for tid, (ds, r) in self.records.items():
+            if ds == "SaGC":
+                self.assertTrue(core.context_text(r, ds).startswith(f"Robot Type: {r['task']}. "), tid)
+
+    def test_safeagentbench_uses_workspace_description(self):
+        for tid, (ds, r) in self.records.items():
+            if ds == "SafeAgentBench":
+                self.assertEqual(core.context_text(r, ds, THOR), THOR[r["scene_name"]])
+
+    @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
+    def test_identical_to_the_model_loaders(self):
+        sys.path.insert(0, str(Path(os.environ["MVT_DIR"]) / "src"))
+        from multivote_triage import datasets as D
+        self.assertEqual(core.AMBIK_APPLIANCES, D.AMBIK_APPLIANCES)
+        models = {t.task_id: t for t in D.load_sagc(ROOT / "augment.json") + D.load_ambik(ROOT / "ambik_test_900.csv")}
+        n = 0
+        for tid, (ds, r) in self.records.items():
+            if ds == "SafeAgentBench":
+                continue
+            key = f"sagc-{tid}" if ds == "SaGC" else "ambik-ambik_test_900-row_" + tid.split("_", 1)[1]
+            self.assertEqual(core.context_text(r, ds), models[key].workspace, tid)
+            self.assertEqual(core.instruction_text(r, ds), models[key].instruction, tid)
+            n += 1
+        self.assertEqual(n, 598 + 472)
+
+
 class TestTargets(unittest.TestCase):
     targets = core.load_targets(ROOT / "study_config.json")
 
@@ -219,7 +275,7 @@ class TestTargets(unittest.TestCase):
 
 class TestTraining(unittest.TestCase):
     def test_version_and_ids(self):
-        self.assertEqual(VERSION, "t3")
+        self.assertEqual(VERSION, "t4")
         self.assertEqual(len({t["id"] for t in TRAINING}), len(TRAINING))
 
     def test_expected_answers_are_exact_option_strings(self):
@@ -262,8 +318,19 @@ class TestTraining(unittest.TestCase):
         ids = [t["source_id"] for t in TRAINING]
         self.assertEqual(ids[ids.index("AmbiK_413_ambiguous") + 1], "AmbiK_413_clear")
 
-    def test_kitchen_instruction(self):
-        self.assertEqual(core.load_instructions(ROOT / "training_tasks.json"), [KITCHEN])
+    def test_models_context_and_no_instructions(self):
+        data = json.loads((ROOT / "training_tasks.json").read_text(encoding="utf-8"))
+        self.assertNotIn("instructions", data)                      # no standard-kitchen line (t4)
+        self.assertNotIn("standard kitchen", json.dumps(data).lower())
+        with open(ROOT / "ambik_test_900.csv", newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        for t in TRAINING:
+            if t["dataset"] == "AmbiK":
+                row = int(re.match(r"AmbiK_(\d+)_", t["source_id"]).group(1))
+                self.assertEqual(t["environment_full"], rows[row]["environment_full"], t["id"])
+                self.assertNotIn("environment_short", t)
+            if t["dataset"] == "SafeAgentBench":
+                self.assertFalse({"step", "final_state", "objects", "involved_objects"} & set(t), t["id"])
 
     @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
     def test_outside_multivote_triage_lists(self):

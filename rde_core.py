@@ -119,11 +119,36 @@ def load_training(path):
     return str(data["version"]), data["tasks"]
 
 
-def load_instructions(path):
-    """Instruction lines shown in the training intro and with every live item (training file field)."""
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    return [] if isinstance(data, list) else [str(x) for x in data.get("instructions", [])]
+# --- Task context: exactly what the models see ---------------------------------------------------
+# AmbiK: the fixed appliance list + environment_full (multivote-triage datasets.load_ambik, PROTOCOL
+# §3.1; the AmbiK repo baselines name the same appliances). SaGC: robot type, locations, objects,
+# people (multivote-triage datasets.load_sagc). SafeAgentBench: the AI2-THOR workspace description
+# (SafeAgentBench safety_test.py, ThorWorkspace.get_workspace_description; thor_workspaces.json).
+AMBIK_APPLIANCES = "a fridge, an oven, a kitchen table, a microwave, a dishwasher, a sink, a tea kettle, "
+
+
+def context_text(task, dataset, thor_workspaces=None):
+    """The workspace text the models get for this task, verbatim."""
+    if dataset == "SaGC":
+        scene = task.get("scene", {})
+        return (f"Robot Type: {task.get('task', '')}. "
+                f"Available Locations: {', '.join(scene.get('floorplan', []))}. "
+                f"Detected Objects: {', '.join(scene.get('objects', []))}. "
+                f"Detected People: {', '.join(scene.get('people', []))}.")
+    if dataset == "AmbiK":
+        return AMBIK_APPLIANCES + task["environment_full"]
+    if dataset == "SafeAgentBench":
+        return thor_workspaces[task["scene_name"]]
+    raise ValueError(dataset)
+
+
+def instruction_text(task, dataset):
+    """The instruction the models get (stripped, as the multivote-triage loaders do)."""
+    if dataset == "SaGC":
+        return str(task.get("goal", "")).strip()
+    if dataset == "AmbiK":
+        return str(task.get("eval_instruction") or task.get("instruction") or "").strip()
+    return str(task.get("instruction", "")).strip()
 
 
 # --- Sheet rows -------------------------------------------------------------------------------

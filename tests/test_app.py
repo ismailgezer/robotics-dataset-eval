@@ -221,13 +221,64 @@ class TestSubmitBlocked(AppCase):
         self.assertFalse(at.button(key=f"check_btn_{t['id']}").disabled)
 
 
-class TestInstructions(AppCase):
-    def test_kitchen_rule_in_training_and_live_pages(self):
-        line = core.load_instructions(ROOT / "training_tasks.json")[0]
+def page_text(at):
+    parts = [e.value for kind in (at.markdown, at.success, at.info, at.code, at.caption) for e in kind]
+    return "\n".join(parts + [e.value for e in at.sidebar.markdown])
+
+
+class TestContext(AppCase):
+    """Annotators see the models' context verbatim, and nothing the models do not see."""
+
+    def records(self):
+        import csv as _csv
+        with open(ROOT / "ambik_test_900.csv", newline="", encoding="utf-8") as f:
+            ambik = list(_csv.DictReader(f))
+        sagc = json.loads((ROOT / "augment.json").read_text(encoding="utf-8"))
+        with open(ROOT / "mixed_detailed_1009.jsonl", encoding="utf-8") as f:
+            sab = [json.loads(l) for l in f if l.strip()]
+        thor = json.loads((ROOT / "thor_workspaces.json").read_text(encoding="utf-8"))
+        return ambik, sagc, sab, thor
+
+    def test_each_dataset_shows_the_models_context(self):
+        ambik, sagc, sab, thor = self.records()
+        at = do_training(self, login(new_app(), "alice"))
+        self.assertNotIn("standard kitchen", page_text(at).lower())
+        for ds in core.DATASETS:
+            at.radio(key="dataset_choice").set_value(ds).run()
+            tid = current(at)[1]
+            if ds == "SaGC":
+                r = sagc[tid]
+            elif ds == "AmbiK":
+                row, form = tid.split("_")[1], tid.split("_")[2]
+                r = dict(ambik[int(row)], instruction=ambik[int(row)]["ambiguous_task" if form == "ambiguous" else "unambiguous_direct"])
+            else:
+                r = sab[int(tid.split("_")[1])]
+            expected = core.context_text(r, ds, thor)
+            self.assertEqual([c.value for c in at.code], [expected], ds)          # verbatim, once
+            self.assertTrue(any(core.instruction_text(r, ds) in m.value for m in at.success), ds)
+            text = page_text(at)
+            if ds == "AmbiK":
+                for field in ("plan_for_amb_task", "plan_for_clear_task", "question", "answer", "user_intent"):
+                    if r[field].strip() and r[field].strip() not in expected:
+                        self.assertNotIn(r[field].strip(), text, field)
+                if r["environment_short"] not in r["environment_full"]:
+                    self.assertNotIn(r["environment_short"], text)
+                self.assertNotIn(r["ambiguity_type"], text)
+            if ds == "SafeAgentBench":
+                self.assertNotIn("Object Presence Check", text)
+                self.assertNotIn("Scene Name", text)
+                if r.get("risk_category"):
+                    self.assertNotIn(str(r["risk_category"]), text)
+            # column F of the answer row records the context that was shown
+            submit_current(at)
+            row = next(x for x in self.rows("alice") if x[2] == tid)
+            self.assertEqual(row[core.COL["Workspace"]], expected)
+
+    def test_training_shows_the_models_context(self):
         at = login(new_app(), "alice")
-        self.assertTrue(any(line in m.value for m in at.markdown))       # training intro
-        do_training(self, at)
-        self.assertTrue(any(line in m.value for m in at.markdown))       # live item page
+        self.assertNotIn("standard kitchen", page_text(at).lower())
+        t = TRAINING[0]
+        self.assertEqual([c.value for c in at.code], [core.AMBIK_APPLIANCES + t["environment_full"]])
 
 
 class TestTrainingFeedback(AppCase):
