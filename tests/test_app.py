@@ -532,6 +532,24 @@ class TestDatasets(AppCase):
         self.assertTrue(at.button(key=f"extras_{ds}"))
 
 
+class TestStaleModule(AppCase):
+    def test_previous_rde_core_in_memory_is_reloaded(self):
+        # After a redeploy the process may still hold the old rde_core: a name added since (here
+        # AMBIK_ALWAYS_PRESENT) is missing and the recorded file time is the old one.
+        import importlib
+        saved = core.AMBIK_ALWAYS_PRESENT
+        del core.AMBIK_ALWAYS_PRESENT
+        core._LOADED_MTIME = 0.0
+        try:
+            at = do_training(self, login(new_app(), "alice"))
+            at.radio(key="dataset_choice").set_value("AmbiK").run()
+            self.assertEqual(at.exception, [])
+            self.assertEqual(core.AMBIK_ALWAYS_PRESENT, saved)
+        finally:
+            if not hasattr(core, "AMBIK_ALWAYS_PRESENT"):
+                importlib.reload(core)
+
+
 class TestRowCheck(unittest.TestCase):
     """Fix C: an update goes to the row that was read, or not at all."""
 
