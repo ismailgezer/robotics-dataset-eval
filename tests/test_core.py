@@ -48,6 +48,10 @@ class TestSignInRules(unittest.TestCase):
         for bad in ("", "   ", "a" * 41, "jane!", "jané", "a/b", "a.b"):
             self.assertEqual(core.validate_id(bad)[1], core.ID_RULE, bad)
 
+    def test_id_whitespace_collapsed(self):
+        self.assertEqual(core.normalize_id("  Jane \t  DOE "), "jane doe")
+        self.assertEqual(core.validate_id(" JANE   doe ")[0], core.validate_id("jane doe")[0])
+
     def test_welcome_message(self):
         self.assertEqual(core.welcome_message("jane doe", 3), "Welcome back, jane doe: 3 items done")
         self.assertIsNone(core.welcome_message("jane doe", 0))
@@ -76,6 +80,21 @@ class TestSheetRows(unittest.TestCase):
         self.assertFalse(core.training_done(values, "alice", "t2"))
         self.assertTrue(core.training_done(values, "bob", "t2"))
         self.assertFalse(core.training_done(values, "bob", "t3"))
+
+    def test_training_done_lookup(self):
+        # Regression (v2.1): a training-complete row counts for the ID however its cell is spaced or
+        # capitalized, with any interface version, if Training_Version is the current one.
+        h = self.header + core.HEADER_V2
+        row = lambda ident, iv, tv: [ident, core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 8 + [iv, tv]  # noqa: E731
+        self.assertTrue(core.training_done([h, row(" Jane  Doe ", "v2", "t6")], "jane doe", "t6"))
+        self.assertTrue(core.training_done([h, row("jane doe", "v2.1", " t6 ")], "jane doe", "t6"))
+        self.assertFalse(core.training_done([h, row("jane doe", "v2", "t5")], "jane doe", "t6"))
+        self.assertFalse(core.training_done([h, row("jane doe", "v2", "t6")], "jane do", "t6"))
+        self.assertFalse(core.training_done([h, ["jane doe", "SaGC", "1"] + ["x"] * 8 + ["v2", "t6"]], "jane doe", "t6"))
+        # an answer row written with other spacing is the same row (updated, not duplicated)
+        values = [h, ["Jane  Doe", "SaGC", "7"] + ["x"] * 8 + ["v2", "t6"]]
+        self.assertEqual(core.find_row(values, core.row_key(["jane doe", "SaGC", "7"] + [""] * 8 + ["v2", "t6"])), 2)
+        self.assertEqual(set(core.labeled_items(values, "jane doe")), {("SaGC", "7")})
 
     def test_header_update(self):
         self.assertEqual(core.header_update(self.header), core.HEADER_V2)

@@ -367,15 +367,9 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, desc
     t_idx = st.session_state.train_idx
 
     if t_idx >= len(train_tasks):
+        # the completion row was written when the last item was finished
         st.success("🎉 **Calibration Complete!** You have unlocked the live dataset evaluation queue.")
         if st.button("Proceed to Live Evaluations 🚀", type="primary", key="proceed_live"):
-            row = [annotator_id, core.TRAINING_MARKER, "PASSED", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",
-                   "N/A", "Completed calibration", core.INTERFACE_VERSION, training_version]
-            try:
-                write_row(sh, row)
-            except core.SheetError:
-                st.error(SHEET_ERROR)
-                return
             st.session_state.is_trained = True
             st.rerun()
         return
@@ -424,6 +418,16 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, desc
             st.info(f"**Expert Explanation:** {task.get('explanation', 'N/A')}")
 
         if st.button("Next Training Task ➡️", type="primary", key=f"next_train_btn_{task.get('id', t_idx)}"):
+            if t_idx + 1 == len(train_tasks):
+                # Record completion now, before "Calibration Complete!" is shown: an annotator who signs
+                # out or closes the tab on that screen must not have to train again.
+                row = [annotator_id, core.TRAINING_MARKER, "PASSED", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",
+                       "N/A", "Completed calibration", core.INTERFACE_VERSION, training_version]
+                try:
+                    write_row(sh, row)
+                except core.SheetError:
+                    st.error(SHEET_ERROR)
+                    return
             st.session_state.train_idx += 1
             st.session_state.show_feedback = False
             st.rerun()

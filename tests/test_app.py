@@ -375,6 +375,48 @@ class TestResume(AppCase):
         alloc = self.book.sheets[core.ALLOC_SHEET].values[1:]
         self.assertEqual(len([x for x in alloc if x[1] == "alice" and x[4] == "SaGC" and x[5] == "1"]), 1)
 
+    def test_training_kept_after_sign_out_and_back_in(self):
+        # Regression (v2.1): same name, other capitalization and spacing, same and new session.
+        at = do_training(self, login(new_app(), "Jane Doe"))
+        marker = [r for r in self.rows() if r[1] == core.TRAINING_MARKER]
+        self.assertEqual([r[0] for r in marker], ["jane doe"])
+        at.button(key="logout_btn").click().run()
+        self.assertFalse(signed_in(at))
+        for again in (login(at, "  JANE doe  "), login(new_app(), "  jane   DOE "), login(new_app(), "Jane Doe")):
+            self.assertEqual(again.session_state["annotator_id"], "jane doe")
+            self.assertTrue(again.session_state["is_trained"])
+            self.assertFalse(any("Calibration Task" in m.value for m in again.markdown))
+        self.assertEqual(len([r for r in self.rows() if r[1] == core.TRAINING_MARKER]), 1)
+
+    def test_training_recorded_before_the_complete_screen(self):
+        # Regression (v2.1): the row used to be written only on 'Proceed to Live Evaluations', so an
+        # annotator who signed out on the 'Calibration Complete!' screen had to train again.
+        at = login(new_app(), "Jane Doe")
+        for t in TRAINING:
+            answer(at, f"train_{t['id']}", expected(t))
+            at.button(key=f"check_btn_{t['id']}").click().run()
+            at.button(key=f"next_train_btn_{t['id']}").click().run()
+        self.assertTrue(any("Calibration Complete" in x for x in texts(at.success)))
+        marker = [r for r in self.rows("jane doe") if r[1] == core.TRAINING_MARKER]
+        self.assertEqual([r[11:13] for r in marker], [[core.INTERFACE_VERSION, TRAINING_VERSION]])
+        at.button(key="logout_btn").click().run()
+        self.assertTrue(login(at, " JANE DOE ").session_state["is_trained"])
+
+    def test_training_write_failure_on_last_item(self):
+        at = login(new_app(), "jane")
+        for i, t in enumerate(TRAINING):
+            answer(at, f"train_{t['id']}", expected(t))
+            at.button(key=f"check_btn_{t['id']}").click().run()
+            if i == len(TRAINING) - 1:
+                self.book.fail = {"write"}
+            at.button(key=f"next_train_btn_{t['id']}").click().run()
+        self.assertTrue(any("Nothing was saved" in e for e in texts(at.error)))
+        self.assertFalse(any("Calibration Complete" in x for x in texts(at.success)))
+        self.book.fail = set()
+        at.button(key=f"next_train_btn_{TRAINING[-1]['id']}").click().run()
+        self.assertTrue(any("Calibration Complete" in x for x in texts(at.success)))
+        self.assertTrue(login(new_app(), "jane").session_state["is_trained"])
+
     def test_new_training_version_requires_training_again(self):
         self.sheet.values.append(["alice", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 8 + ["v2", "t1"])
         at = login(new_app(), "alice")

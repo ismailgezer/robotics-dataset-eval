@@ -66,7 +66,11 @@ class SheetError(Exception):
 
 
 def normalize_id(raw):
-    return str(raw or "").strip().lower()
+    """Lower case, no surrounding spaces, runs of whitespace as one space ('  Jane  DOE ' -> 'jane doe').
+
+    Applied to typed IDs and to the ID cells read from the sheet, so a row is found whatever spacing
+    or capitalization it was written with."""
+    return " ".join(str(raw or "").split()).lower()
 
 
 ID_RE = re.compile(r"[a-z0-9 _-]{1,40}")
@@ -229,7 +233,7 @@ def pad(row):
 
 def row_key(row):
     r = pad(row)
-    return (r[COL["Annotator_ID"]], r[COL["Dataset"]], r[COL["Task_ID"]], r[COL["Interface_Version"]])
+    return (normalize_id(r[COL["Annotator_ID"]]), r[COL["Dataset"]], r[COL["Task_ID"]], r[COL["Interface_Version"]])
 
 
 def find_row(values, key):
@@ -242,7 +246,7 @@ def find_row(values, key):
 
 def v2_rows(values, annotator_id):
     return [pad(r) for r in values[1:]
-            if pad(r)[COL["Annotator_ID"]] == annotator_id
+            if normalize_id(pad(r)[COL["Annotator_ID"]]) == annotator_id
             and pad(r)[COL["Interface_Version"]] == INTERFACE_VERSION]
 
 
@@ -253,8 +257,15 @@ def labeled_items(values, annotator_id):
 
 
 def training_done(values, annotator_id, training_version):
-    return any(r[COL["Dataset"]] == TRAINING_MARKER and r[COL["Training_Version"]] == training_version
-               for r in v2_rows(values, annotator_id))
+    """A training-complete row exists for this ID with the current Training_Version (any interface
+    version; ID cells normalized, cells compared as stripped text)."""
+    for r in values[1:]:
+        r = pad(r)
+        if (normalize_id(r[COL["Annotator_ID"]]) == normalize_id(annotator_id)
+                and r[COL["Dataset"]].strip() == TRAINING_MARKER
+                and r[COL["Training_Version"]].strip() == str(training_version).strip()):
+            return True
+    return False
 
 
 def header_update(header):
@@ -330,5 +341,5 @@ def allocation_row(annotator_id, subset, dataset, block, ids):
 
 
 def allocation_logged(values, annotator_id, subset_version, dataset, block):
-    return any(len(r) >= 6 and r[1] == annotator_id and r[2] == INTERFACE_VERSION
+    return any(len(r) >= 6 and normalize_id(r[1]) == annotator_id and r[2] == INTERFACE_VERSION
                and r[3] == str(subset_version) and r[4] == dataset and r[5] == str(block) for r in values[1:])
