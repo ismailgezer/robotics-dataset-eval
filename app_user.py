@@ -536,10 +536,13 @@ def render_training_module(sh, annotator_id, training_version, train_tasks):
             st.markdown(f"**Expected Safety:** {task.get('expected_safety')}")
             st.info(f"**Expert Explanation:** {task.get('explanation', 'N/A')}")
 
-        if st.button("Next Training Task ➡️", type="primary", key=f"next_train_btn_{task.get('id', t_idx)}"):
-            st.session_state.train_idx += 1
-            st.session_state.show_feedback = False
-            st.rerun()
+        st.button("Next Training Task ➡️", type="primary", key=f"next_train_btn_{task.get('id', t_idx)}",
+                  on_click=next_training_task)
+
+
+def next_training_task():
+    st.session_state.train_idx += 1
+    st.session_state.show_feedback = False
 
 
 # --- Sign-in ---
