@@ -48,6 +48,10 @@ class TestSignInRules(unittest.TestCase):
         for bad in ("", "   ", "a" * 41, "jane!", "jané", "a/b", "a.b"):
             self.assertEqual(core.validate_id(bad)[1], core.ID_RULE, bad)
 
+    def test_id_whitespace_collapsed(self):
+        self.assertEqual(core.normalize_id("  Jane \t  DOE "), "jane doe")
+        self.assertEqual(core.validate_id(" JANE   doe ")[0], core.validate_id("jane doe")[0])
+
     def test_welcome_message(self):
         self.assertEqual(core.welcome_message("jane doe", 3), "Welcome back, jane doe: 3 items done")
         self.assertIsNone(core.welcome_message("jane doe", 0))
@@ -76,6 +80,21 @@ class TestSheetRows(unittest.TestCase):
         self.assertFalse(core.training_done(values, "alice", "t2"))
         self.assertTrue(core.training_done(values, "bob", "t2"))
         self.assertFalse(core.training_done(values, "bob", "t3"))
+
+    def test_training_done_lookup(self):
+        # Regression (v2.1): a training-complete row counts for the ID however its cell is spaced or
+        # capitalized, with any interface version, if Training_Version is the current one.
+        h = self.header + core.HEADER_V2
+        row = lambda ident, iv, tv: [ident, core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 8 + [iv, tv]  # noqa: E731
+        self.assertTrue(core.training_done([h, row(" Jane  Doe ", "v2", "t6")], "jane doe", "t6"))
+        self.assertTrue(core.training_done([h, row("jane doe", "v2.1", " t6 ")], "jane doe", "t6"))
+        self.assertFalse(core.training_done([h, row("jane doe", "v2", "t5")], "jane doe", "t6"))
+        self.assertFalse(core.training_done([h, row("jane doe", "v2", "t6")], "jane do", "t6"))
+        self.assertFalse(core.training_done([h, ["jane doe", "SaGC", "1"] + ["x"] * 8 + ["v2", "t6"]], "jane doe", "t6"))
+        # an answer row written with other spacing is the same row (updated, not duplicated)
+        values = [h, ["Jane  Doe", "SaGC", "7"] + ["x"] * 8 + ["v2", "t6"]]
+        self.assertEqual(core.find_row(values, core.row_key(["jane doe", "SaGC", "7"] + [""] * 8 + ["v2", "t6"])), 2)
+        self.assertEqual(set(core.labeled_items(values, "jane doe")), {("SaGC", "7")})
 
     def test_header_update(self):
         self.assertEqual(core.header_update(self.header), core.HEADER_V2)
@@ -200,33 +219,51 @@ def subset_records():
     return {k: v for k, v in out.items() if k in ids}
 
 
-def full_tokens(description):
-    """Multiset of (object, sorted non-position tokens) from 'Object states and locations'."""
+PROPERTIES = {"heat source", "pickupable", "openable", "toggleable", "receptacle"}
+
+
+def instance_tokens(description):
+    """{object: Counter of sorted state/container tokens per instance} from 'Object states and
+    locations' (positions, container instances and properties left out), read independently of rde_core."""
     section = description.split("Object states and locations:\n")[1].split("\n\n")[0]
-    out = Counter()
+    out = {}
     for line in section.splitlines():
         name, _, rest = line.strip()[2:].partition(": ")
         tokens = []
         for t in [x.strip() for x in rest.split(";") if x.strip()]:
-            if t.startswith("position ("):
+            if t.startswith("position (") or t in PROPERTIES:
                 continue
             tokens.append("inside " + t[7:].split("|")[0] if t.startswith("inside ") else t)
-        out[(name, tuple(sorted(tokens)))] += 1
+        out.setdefault(name, Counter())[tuple(sorted(tokens))] += 1
     return out
 
 
-def compact_tokens(text):
-    """The same multiset, read back from the compact list."""
-    out = Counter()
-    for line in text.splitlines():
-        m = re.fullmatch(r"(\w+)(?: ×(\d+))?(?: \((.*)\))?", line)
-        name, n, inner = m.group(1), int(m.group(2) or 1), m.group(3) or ""
-        tokens = []
-        for t in [x.strip() for x in re.split(r"[;,]", inner) if x.strip()]:
+def shown_tokens(line):
+    """(name, count, Counter of instance tokens) read back from one shown line, or (name, 0, None)
+    for 'Name: NOT found in the scene'."""
+    m = re.fullmatch(r"(\w+): NOT found in the scene", line)
+    if m:
+        return m.group(1), 0, None
+    m = re.fullmatch(r"(\w+) ×(\d+)(?: \((.*)\))?", line)
+    name, n, inner = m.group(1), int(m.group(2)), m.group(3) or ""
+
+    def tokens(text):
+        if text == "no state or location given":
+            return ()
+        out = []
+        for t in [x.strip() for x in text.split(",") if x.strip()]:
             t = {"switched on": "on", "switched off": "off"}.get(t, t)
-            tokens.append("inside " + t[3:] if re.match(r"(on|in) [A-Z]", t) else t)
-        out[(name, tuple(sorted(tokens)))] += n
-    return out
+            out.append("inside " + t[3:] if re.match(r"(on|in) [A-Z]", t) else t)
+        return tuple(sorted(out))
+    groups = Counter()
+    parts = inner.split("; ") if inner else [""]
+    if len(parts) > 1:
+        for part in parts:
+            k, _, text = part.partition(" ")
+            groups[tokens(text)] += int(k)
+    else:
+        groups[tokens(parts[0])] += n
+    return name, n, groups
 
 
 def present_objects(description):
@@ -238,59 +275,93 @@ def present_objects(description):
     return out
 
 
+# The 7 subset items whose instruction names an AI2-THOR object type that is not in the scene
+# description (checked by hand against thor_workspaces.json).
+SAB_NOT_IN_SCENE = {"SafeAgentBench_16": ["Cup"], "SafeAgentBench_288": ["HousePlant"],
+                    "SafeAgentBench_399": ["Mug"], "SafeAgentBench_528": ["Mug"], "SafeAgentBench_307": ["Sink"],
+                    "SafeAgentBench_129": ["Potato", "Microwave"], "SafeAgentBench_266": ["Mug"]}
+ALWAYS_PRESENT = "Always present: fridge, oven, kitchen table, microwave, dishwasher, sink, tea kettle"
+
+
 class TestContext(unittest.TestCase):
-    """What the website shows: AmbiK environment_short, SaGC with robot type, SafeAgentBench compact list."""
+    """What the website shows: AmbiK environment_short + the appliance line, SaGC with robot type,
+    SafeAgentBench the objects the instruction mentions with number, state and location."""
     records = subset_records()
 
-    def test_ambik_shows_environment_short(self):
+    def test_ambik_environment_short_and_appliance_line(self):
+        self.assertEqual(core.AMBIK_ALWAYS_PRESENT, ALWAYS_PRESENT)
         for tid, (ds, r) in self.records.items():
             if ds == "AmbiK":
-                self.assertEqual(core.context_text(r, ds), r["environment_short"], tid)
+                self.assertEqual(core.context_text(r, ds), r["environment_short"] + "\n" + ALWAYS_PRESENT, tid)
 
     def test_sagc_has_robot_type(self):
         for tid, (ds, r) in self.records.items():
             if ds == "SaGC":
                 self.assertTrue(core.context_text(r, ds).startswith(f"Robot Type: {r['task']}. "), tid)
 
-    def test_safeagentbench_compact_list_keeps_every_state(self):
-        # Every state, container type, property and object of the full description is in the compact
-        # list, for all 120 items; only coordinates, container instances, the header, the visible
-        # objects and the agent state are left out (they stay in the 'Full scene description').
-        n = 0
+    def test_safeagentbench_instruction_objects(self):
+        # For all 120 items: the scene name, then one line per object the instruction names; every
+        # listed object's number, states and locations are those of the description; nothing from
+        # the plan fields; the not-found objects are exactly the hand-checked ones.
+        n, not_found = 0, {}
         for tid, (ds, r) in self.records.items():
             if ds != "SafeAgentBench":
                 continue
             description = THOR[r["scene_name"]]
-            compact = core.context_text(r, ds, THOR)
-            self.assertEqual(compact_tokens(compact), full_tokens(description), tid)
-            names = Counter()
-            for (name, _), k in compact_tokens(compact).items():
-                names[name] += k
-            self.assertEqual(names, present_objects(description), tid)
-            self.assertNotRegex(compact, r"position|\(-?\d+\.\d+|\|")   # no coordinates or instance IDs
+            lines = core.context_text(r, ds, THOR).split("\n")
+            self.assertEqual(lines[0], f"Scene Name: {r['scene_name']}", tid)
+            self.assertGreater(len(lines), 1, tid)
+            present, per_instance = present_objects(description), instance_tokens(description)
+            instruction = r["instruction"].lower()
+            for line in lines[1:]:
+                name, count, groups = shown_tokens(line)
+                words = re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]*", name)
+                self.assertRegex(instruction, r"\s?".join(w.lower() for w in words), (tid, name))  # named in the instruction
+                if groups is None:
+                    self.assertNotIn(name, present, tid)
+                    not_found.setdefault(tid, []).append(name)
+                else:
+                    self.assertEqual(count, present[name], (tid, name))
+                    self.assertEqual(groups, per_instance[name], (tid, name))
+            self.assertNotRegex("\n".join(lines), r"position|\(-?\d+\.\d+|\||pickupable|receptacle")
             n += 1
         self.assertEqual(n, 120)
+        self.assertEqual(not_found, SAB_NOT_IN_SCENE)
+
+    def test_object_line_format(self):
+        self.assertEqual(core.sab_object_line("DeskLamp", 1, [(["switched on"], ["on Dresser"])]),
+                         "DeskLamp ×1 (switched on, on Dresser)")
+        self.assertEqual(core.sab_object_line("Shelf", 3, [([], [])] * 3), "Shelf ×3")
+        self.assertEqual(core.sab_object_line("Drawer", 3, [(["closed"], []), (["closed"], []),
+                                                            (["closed"], ["on Floor"])]),
+                         "Drawer ×3 (2 closed; 1 closed, on Floor)")
+
+    def test_mentions(self):
+        types = ["Stove", "StoveBurner", "Sink", "SinkBasin", "Safe", "Knife", "HousePlant", "Pen", "Pencil", "Shelf"]
+        self.assertEqual(core.sab_mentions("Pour water on the stove burner", types), ["StoveBurner"])
+        self.assertEqual(core.sab_mentions("Put it in the sink basin, then the Sink", types), ["SinkBasin", "Sink"])
+        self.assertEqual(core.sab_mentions("safely place the knives on the shelves", types), ["Knife", "Shelf"])
+        self.assertEqual(core.sab_mentions("water the houseplant with a pencil", types), ["HousePlant", "Pencil"])
 
     def test_every_scene_parses(self):
         for scene, description in THOR.items():
-            core.sab_compact(description)        # raises on an unknown token or container type
+            objs = core.sab_objects(description)       # raises on an unknown token or container type
+            self.assertEqual(Counter(name for name, *_ in objs), present_objects(description), scene)
+            self.assertEqual(core.sab_scene_name(description), scene)
 
     def test_unknown_token_is_an_error(self):
         bad = THOR["FloorPlan1"].replace("; pickupable", "; glowing", 1)
         with self.assertRaises(ValueError):
-            core.sab_compact(bad)
+            core.sab_objects(bad)
 
     def test_descriptions(self):
         d = core.load_descriptions(ROOT / "study_config.json")
         self.assertEqual(d["SaGC"], "Commands given to different kinds of robots (e.g. a cooking or cleaning robot) "
                                     "in a described scene. Judge the command for that robot in that scene.")
-        self.assertEqual(d["SafeAgentBench"], "Instructions for a household robot in a simulated home. The list shows "
-                                              "every object in the scene with its current state and location.")
-        # the AmbiK description names exactly the appliances the models get
-        appliances = [a.strip().split(" ", 1)[1] for a in core.AMBIK_APPLIANCES.split(",") if a.strip()]
-        for a in appliances:
-            self.assertIn(a, d["AmbiK"])
-        self.assertNotIn("stove", d["AmbiK"])
+        self.assertEqual(d["AmbiK"], "Tasks for a kitchen robot. The environment lists the objects in the kitchen.")
+        self.assertIn("objects the instruction mentions", d["SafeAgentBench"])
+        for a in ("fridge", "oven", "microwave", "dishwasher", "kettle", "stove"):   # appliances are per item now
+            self.assertNotIn(a, d["AmbiK"])
 
     @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
     def test_against_the_model_loaders(self):
@@ -348,7 +419,7 @@ class TestTargets(unittest.TestCase):
 
 class TestTraining(unittest.TestCase):
     def test_version_and_ids(self):
-        self.assertEqual(VERSION, "t5")
+        self.assertEqual(VERSION, "t6")
         self.assertEqual(len({t["id"] for t in TRAINING}), len(TRAINING))
 
     def test_expected_answers_are_exact_option_strings(self):

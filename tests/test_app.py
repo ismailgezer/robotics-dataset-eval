@@ -257,43 +257,72 @@ class TestContext(AppCase):
             else:
                 r = sab[int(tid.split("_")[1])]
             shown = core.context_text(r, ds, thor)
+            md = [m.value for m in at.markdown]
             codes = [c.value for c in at.code]
-            if ds == "SafeAgentBench":
-                self.assertEqual(codes, [shown, thor[r["scene_name"]]])     # compact list + raw (in the expander)
-                self.assertEqual([e.label for e in at.expander if e.label == "Full scene description"],
-                                 ["Full scene description"])
-            else:
-                self.assertEqual(codes, [shown], ds)
-            if ds == "AmbiK":
-                self.assertEqual(shown, r["environment_short"])
+            # v1 layout: bold labels written line by line in the 'Environment & Workspace' column
             if ds == "SaGC":
+                scene = r["scene"]
+                for line in (f"**Robot Type:** {r['task']}",
+                             f"**Available Locations:** {', '.join(scene.get('floorplan', []))}",
+                             f"**Detected Objects:** {', '.join(scene.get('objects', []))}",
+                             f"**Detected People:** {', '.join(scene.get('people', []))}"):
+                    self.assertIn(line, md)
                 self.assertTrue(shown.startswith(f"Robot Type: {r['task']}. "))
+                self.assertEqual(codes, [])
+            if ds == "AmbiK":
+                self.assertIn(f"**Kitchen Items:** {r['environment_short']}", md)
+                self.assertIn("**Always present:** fridge, oven, kitchen table, microwave, dishwasher, sink, tea kettle", md)
+                self.assertEqual(shown, r["environment_short"] + "\n" + core.AMBIK_ALWAYS_PRESENT)
+                self.assertEqual(codes, [])
+            if ds == "SafeAgentBench":
+                lines = shown.split("\n")
+                self.assertIn(f"**Scene Name:** {r['scene_name']}", md)
+                self.assertIn("**Object Presence Check:**", md)
+                bullets = [m for m in md if m.startswith("- ✅ ") or m.startswith("- ❌ ")]
+                self.assertEqual([b.replace("- ✅ ", "").replace("- ❌ ", "").replace("**", "")
+                                  .replace(" was NOT found", ": NOT found") for b in bullets], lines[1:])
+                self.assertEqual(codes, [thor[r["scene_name"]]])                  # raw description, in the expander
+                self.assertEqual([e.label for e in at.expander if "Complete Workspace State" in e.label],
+                                 ["🔍 View Complete Workspace State (Objects & Coordinates)"])
+                for field in ("objects", "involved_objects"):                     # nothing from the plan fields
+                    for o in r.get(field) or []:
+                        if o.lower() not in r["instruction"].lower():
+                            self.assertFalse(any(f"**{o}**" in b for b in bullets), (tid, o))
+                if r.get("risk_category"):
+                    self.assertNotIn(str(r["risk_category"]), page_text(at))
             self.assertTrue(any(core.instruction_text(r, ds) in m.value for m in at.success), ds)
-            # the description: at dataset selection (until the first answer) and small above each item
+            # the description: once, in the blue box at dataset selection (until the first answer)
             self.assertIn(f"**{ds}:** {DESCRIPTIONS[ds]}", texts(at.info))
-            self.assertIn(DESCRIPTIONS[ds], texts(at.caption))
+            self.assertNotIn(DESCRIPTIONS[ds], texts(at.caption))
             text = page_text(at)
             if ds == "AmbiK":
                 for field in ("plan_for_amb_task", "plan_for_clear_task", "question", "answer", "user_intent"):
                     if r[field].strip() and r[field].strip() not in shown:
                         self.assertNotIn(r[field].strip(), text, field)
                 self.assertNotIn(r["ambiguity_type"], text)
-            if ds == "SafeAgentBench":
-                self.assertNotIn("Object Presence Check", text)
-                if r.get("risk_category"):
-                    self.assertNotIn(str(r["risk_category"]), text)
             submit_current(at)
             row = next(x for x in self.rows("alice") if x[2] == tid)
             self.assertEqual(row[core.COL["Workspace"]], shown)              # column F = what was shown
             self.assertNotIn(f"**{ds}:** {DESCRIPTIONS[ds]}", texts(at.info))  # box gone after the first answer
-            self.assertIn(DESCRIPTIONS[ds], texts(at.caption))                 # small text stays
+            self.assertNotIn(DESCRIPTIONS[ds], page_text(at))                 # and not repeated above items
 
     def test_training_shows_the_same_display(self):
         at = login(new_app(), "alice")
         self.assertNotIn("standard kitchen", page_text(at).lower())
-        t = TRAINING[0]
-        self.assertEqual([c.value for c in at.code], [t["environment_short"]])
-        self.assertIn(DESCRIPTIONS["AmbiK"], texts(at.caption))
+        seen = set()
+        for t in TRAINING:
+            ds = t["dataset"]
+            box = f"**{ds}:** {DESCRIPTIONS[ds]}"
+            self.assertEqual(box in texts(at.info), ds not in seen, t["id"])   # once per dataset
+            seen.add(ds)
+            if ds == "AmbiK":
+                self.assertIn(f"**Kitchen Items:** {t['environment_short']}", [m.value for m in at.markdown])
+                self.assertIn(f"**{core.AMBIK_ALWAYS_PRESENT.replace(': ', ':** ', 1)}", [m.value for m in at.markdown])
+            if ds == "SafeAgentBench":
+                self.assertIn("**Object Presence Check:**", [m.value for m in at.markdown])
+            answer(at, f"train_{t['id']}", expected(t))
+            at.button(key=f"check_btn_{t['id']}").click().run()
+            at.button(key=f"next_train_btn_{t['id']}").click().run()
 
 
 class TestTrainingFeedback(AppCase):
@@ -374,6 +403,48 @@ class TestResume(AppCase):
         self.assertEqual(current(r)[1], flat[3])
         alloc = self.book.sheets[core.ALLOC_SHEET].values[1:]
         self.assertEqual(len([x for x in alloc if x[1] == "alice" and x[4] == "SaGC" and x[5] == "1"]), 1)
+
+    def test_training_kept_after_sign_out_and_back_in(self):
+        # Regression (v2.1): same name, other capitalization and spacing, same and new session.
+        at = do_training(self, login(new_app(), "Jane Doe"))
+        marker = [r for r in self.rows() if r[1] == core.TRAINING_MARKER]
+        self.assertEqual([r[0] for r in marker], ["jane doe"])
+        at.button(key="logout_btn").click().run()
+        self.assertFalse(signed_in(at))
+        for again in (login(at, "  JANE doe  "), login(new_app(), "  jane   DOE "), login(new_app(), "Jane Doe")):
+            self.assertEqual(again.session_state["annotator_id"], "jane doe")
+            self.assertTrue(again.session_state["is_trained"])
+            self.assertFalse(any("Calibration Task" in m.value for m in again.markdown))
+        self.assertEqual(len([r for r in self.rows() if r[1] == core.TRAINING_MARKER]), 1)
+
+    def test_training_recorded_before_the_complete_screen(self):
+        # Regression (v2.1): the row used to be written only on 'Proceed to Live Evaluations', so an
+        # annotator who signed out on the 'Calibration Complete!' screen had to train again.
+        at = login(new_app(), "Jane Doe")
+        for t in TRAINING:
+            answer(at, f"train_{t['id']}", expected(t))
+            at.button(key=f"check_btn_{t['id']}").click().run()
+            at.button(key=f"next_train_btn_{t['id']}").click().run()
+        self.assertTrue(any("Calibration Complete" in x for x in texts(at.success)))
+        marker = [r for r in self.rows("jane doe") if r[1] == core.TRAINING_MARKER]
+        self.assertEqual([r[11:13] for r in marker], [[core.INTERFACE_VERSION, TRAINING_VERSION]])
+        at.button(key="logout_btn").click().run()
+        self.assertTrue(login(at, " JANE DOE ").session_state["is_trained"])
+
+    def test_training_write_failure_on_last_item(self):
+        at = login(new_app(), "jane")
+        for i, t in enumerate(TRAINING):
+            answer(at, f"train_{t['id']}", expected(t))
+            at.button(key=f"check_btn_{t['id']}").click().run()
+            if i == len(TRAINING) - 1:
+                self.book.fail = {"write"}
+            at.button(key=f"next_train_btn_{t['id']}").click().run()
+        self.assertTrue(any("Nothing was saved" in e for e in texts(at.error)))
+        self.assertFalse(any("Calibration Complete" in x for x in texts(at.success)))
+        self.book.fail = set()
+        at.button(key=f"next_train_btn_{TRAINING[-1]['id']}").click().run()
+        self.assertTrue(any("Calibration Complete" in x for x in texts(at.success)))
+        self.assertTrue(login(new_app(), "jane").session_state["is_trained"])
 
     def test_new_training_version_requires_training_again(self):
         self.sheet.values.append(["alice", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 8 + ["v2", "t1"])

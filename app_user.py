@@ -252,22 +252,52 @@ def load_thor_workspaces():
         return json.load(f)
 
 
-def render_task_display(task, dataset_choice, description=None):
-    """Shows the dataset description (small), the task context and the instruction.
+@st.cache_resource
+def load_sab_vocabulary():
+    return core.sab_vocabulary(load_thor_workspaces())
 
-    AmbiK: environment_short; SaGC: the models' workspace text with the robot type; SafeAgentBench:
-    the compact object list (states, containers, properties) and the raw description in an expander.
-    Nothing the models do not see is shown (no labels, ambiguity types, plans or derived checks)."""
-    if description:
-        st.caption(description)
+
+def render_task_display(task, dataset_choice):
+    """Environment box and instruction box, laid out and styled as in v1.
+
+    Content (rde_core.context_text, recorded in column F): AmbiK environment_short plus the appliance
+    list the models always get; SaGC the models' workspace text with the robot type; SafeAgentBench the
+    objects the instruction mentions with number, state and location, and the full description behind
+    a click. Nothing the models do not see is shown (no labels, ambiguity types, plans or plan fields)."""
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("Environment & Workspace")
-        st.code(core.context_text(task, dataset_choice, load_thor_workspaces()), language=None, wrap_lines=True)
-        if dataset_choice == "SafeAgentBench":
-            with st.expander("Full scene description", expanded=False):
-                st.code(load_thor_workspaces()[task["scene_name"]], language=None)
+
+        if dataset_choice == "SaGC":
+            scene = task.get('scene', {})
+            st.write("**Robot Type:**", str(task.get('task', '')))
+            st.write("**Available Locations:**", ", ".join(scene.get('floorplan', [])))
+            st.write("**Detected Objects:**", ", ".join(scene.get('objects', [])))
+            st.write("**Detected People:**", ", ".join(scene.get('people', [])))
+
+        elif dataset_choice == "AmbiK":
+            st.write("**Kitchen Items:**", str(task['environment_short']))
+            label, appliances = core.AMBIK_ALWAYS_PRESENT.split(": ", 1)
+            st.write(f"**{label}:**", appliances)
+
+        elif dataset_choice == "SafeAgentBench":
+            workspace_desc = load_thor_workspaces()[task['scene_name']]
+            st.write(f"**Scene Name:** {task['scene_name']}")
+            objs = core.sab_instruction_objects(core.instruction_text(task, dataset_choice), workspace_desc,
+                                                load_sab_vocabulary())
+            if objs:
+                st.write("**Object Presence Check:**")
+                for name, line, found in objs:
+                    if found:
+                        st.markdown(f"- ✅ **{name}**{line[len(name):]}")
+                    else:
+                        st.markdown(f"- ❌ **{name}** was {core.SAB_NOT_FOUND}")
+            else:
+                st.write("**Object Presence Check:** No task-specific objects identified.")
+
+            with st.expander("🔍 View Complete Workspace State (Objects & Coordinates)", expanded=False):
+                st.code(workspace_desc, language="text")
 
     with col2:
         st.subheader("Command / Instruction")
@@ -367,15 +397,9 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, desc
     t_idx = st.session_state.train_idx
 
     if t_idx >= len(train_tasks):
+        # the completion row was written when the last item was finished
         st.success("🎉 **Calibration Complete!** You have unlocked the live dataset evaluation queue.")
         if st.button("Proceed to Live Evaluations 🚀", type="primary", key="proceed_live"):
-            row = [annotator_id, core.TRAINING_MARKER, "PASSED", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",
-                   "N/A", "Completed calibration", core.INTERFACE_VERSION, training_version]
-            try:
-                write_row(sh, row)
-            except core.SheetError:
-                st.error(SHEET_ERROR)
-                return
             st.session_state.is_trained = True
             st.rerun()
         return
@@ -385,7 +409,9 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, desc
 
     # 1. Reuse task display
     dataset = task.get('dataset', 'AmbiK')
-    render_task_display(task, dataset, (descriptions or {}).get(dataset))
+    if descriptions and all(t.get('dataset') != dataset for t in train_tasks[:t_idx]):
+        st.info(f"**{dataset}:** {descriptions[dataset]}")   # once: on the first item of each dataset
+    render_task_display(task, dataset)
     st.divider()
 
     # 2. Reuse evaluation form
@@ -424,6 +450,16 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, desc
             st.info(f"**Expert Explanation:** {task.get('explanation', 'N/A')}")
 
         if st.button("Next Training Task ➡️", type="primary", key=f"next_train_btn_{task.get('id', t_idx)}"):
+            if t_idx + 1 == len(train_tasks):
+                # Record completion now, before "Calibration Complete!" is shown: an annotator who signs
+                # out or closes the tab on that screen must not have to train again.
+                row = [annotator_id, core.TRAINING_MARKER, "PASSED", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",
+                       "N/A", "Completed calibration", core.INTERFACE_VERSION, training_version]
+                try:
+                    write_row(sh, row)
+                except core.SheetError:
+                    st.error(SHEET_ERROR)
+                    return
             st.session_state.train_idx += 1
             st.session_state.show_feedback = False
             st.rerun()
@@ -551,7 +587,7 @@ def main():
 
     current_task = items[task_id]
     described = st.session_state.setdefault("described", set())
-    if dataset_choice not in described:  # shown when a dataset is selected, until its first answer
+    if dataset_choice not in described:  # shown once: when a dataset is selected, until its first answer
         st.info(f"**{dataset_choice}:** {descriptions[dataset_choice]}")
     heading = f"### Evaluating **{dataset_choice}** · {done} of {target}"
     if extras[dataset_choice]:
@@ -573,7 +609,7 @@ def main():
             st.rerun()
 
     # 1. Render Task Display
-    render_task_display(current_task, dataset_choice, descriptions[dataset_choice])
+    render_task_display(current_task, dataset_choice)
     st.divider()
 
     # 2. Render Evaluation Widgets (saved answers shown when going back)

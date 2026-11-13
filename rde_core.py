@@ -66,7 +66,11 @@ class SheetError(Exception):
 
 
 def normalize_id(raw):
-    return str(raw or "").strip().lower()
+    """Lower case, no surrounding spaces, runs of whitespace as one space ('  Jane  DOE ' -> 'jane doe').
+
+    Applied to typed IDs and to the ID cells read from the sheet, so a row is found whatever spacing
+    or capitalization it was written with."""
+    return " ".join(str(raw or "").split()).lower()
 
 
 ID_RE = re.compile(r"[a-z0-9 _-]{1,40}")
@@ -120,11 +124,15 @@ def load_training(path):
 
 
 # --- Task context shown to annotators ------------------------------------------------------------
-# AmbiK: environment_short (the models also get the appliance list below, which the AmbiK dataset
-# description names). SaGC: the models' workspace text (robot type, locations, objects, people).
-# SafeAgentBench: a compact object list generated from the AI2-THOR workspace description the models
-# get (every object with its states, container and properties), plus the raw description.
+# AmbiK: environment_short and one line with the appliance list the models always get.
+# SaGC: the models' workspace text (robot type, locations, objects, people).
+# SafeAgentBench: as in v1, only the objects the instruction mentions, with their number from the
+# AI2-THOR workspace description the models get, now with each object's state and location; objects
+# the instruction mentions that the description does not contain are listed as not found. Nothing is
+# taken from the plan fields (step, final_state, objects, involved_objects), which the models do not get.
 AMBIK_APPLIANCES = "a fridge, an oven, a kitchen table, a microwave, a dishwasher, a sink, a tea kettle, "
+AMBIK_ALWAYS_PRESENT = "Always present: " + ", ".join(
+    re.sub(r"^(a|an) ", "", a.strip()) for a in AMBIK_APPLIANCES.split(",") if a.strip())
 SAB_STATES = {"open", "closed", "on", "off", "dirty", "filled with liquid", "broken", "moving"}
 SAB_STATE_WORDS = {"on": "switched on", "off": "switched off"}  # so the state is not read as a location
 SAB_PROPERTIES = {"heat source", "pickupable", "openable", "toggleable", "receptacle"}
@@ -134,6 +142,7 @@ SAB_ON = {"ArmChair", "Bed", "Chair", "CoffeeTable", "CounterTop", "Desk", "Dini
           "ToiletPaperHanger", "TowelHolder"}
 SAB_IN = {"Bathtub", "Bowl", "Cabinet", "CoffeeMachine", "Cup", "Drawer", "Fridge", "GarbageCan", "Microwave",
           "Pan", "Pot", "Sink"}
+SAB_NOT_FOUND = "NOT found in the scene"
 
 
 def sab_objects(description):
@@ -168,30 +177,91 @@ def sab_objects(description):
     return out
 
 
-def sab_compact(description):
-    """One line per object, e.g. 'Book (closed, on Desk; openable, pickupable)'; identical lines
-    (several instances in the same state and container type) are written once with '×n', in the order
-    of first appearance (the description is alphabetical)."""
-    lines = []
-    for name, states, containers, props in sab_objects(description):
-        inner = ", ".join(states + containers)
-        if props:
-            inner = (inner + "; " if inner else "") + ", ".join(props)
-        lines.append(f"{name} ({inner})" if inner else name)
-    counts = {}
-    for line in lines:                       # identical entries merged, in order of first appearance
-        counts[line] = counts.get(line, 0) + 1
+def sab_present(description):
+    """{object type: instances} from 'Objects present in the scene' (the counts v1 showed)."""
+    section = description.split("Objects present in the scene:\n", 1)[1].split("\n\n", 1)[0]
+    out = {}
+    for line in section.splitlines():
+        m = re.fullmatch(r"- (\w+)(?: \(instances: (\d+)\))?", line.strip())
+        if not m:
+            raise ValueError(f"unexpected line: {line!r}")
+        out[m.group(1)] = int(m.group(2) or 1)
+    return out
+
+
+def _type_pattern(name):
+    """'StoveBurner' matches 'StoveBurner', 'stove burner', 'stoveburners' (whole words, any case)."""
+    words = [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]*", name)]
+    w = words[-1]
+    forms = {w, w + "s", w + "es", w[:-1] + "ies"}
+    if w.endswith("fe"):
+        forms.add(w[:-2] + "ves")      # knife -> knives
+    elif w.endswith("f"):
+        forms.add(w[:-1] + "ves")      # shelf -> shelves
+    plural = "(?:" + "|".join(sorted(map(re.escape, forms), key=len, reverse=True)) + ")"
+    return re.compile(r"\b" + r"\s?".join([re.escape(w) for w in words[:-1]] + [plural]) + r"\b", re.I)
+
+
+def sab_mentions(instruction, types):
+    """Object types (from `types`) the instruction names, in order of first mention. Longer names
+    win over names inside them ('stove burner' is StoveBurner, not Stove; 'sink basin' is SinkBasin)."""
+    found, spans = [], []
+    for name in sorted(types, key=lambda t: (-len(t), t)):
+        for m in _type_pattern(name).finditer(instruction):
+            if not any(m.start() < e and s < m.end() for s, e in spans):
+                spans.append((m.start(), m.end()))
+                found.append((m.start(), name))
     out = []
-    for line, n in counts.items():
-        if n == 1:
-            out.append(line)
+    for _, name in sorted(found):
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def sab_object_line(name, count, instances):
+    """'DeskLamp ×1 (switched on, on Dresser)'; instances in different states or places are grouped,
+    e.g. 'Drawer ×5 (3 closed; 2 closed, on Floor)'."""
+    groups = {}
+    for states, containers in instances:
+        text = ", ".join(states + containers)
+        groups[text] = groups.get(text, 0) + 1
+    if len(groups) == 1:
+        text = next(iter(groups))
+        return f"{name} ×{count}" + (f" ({text})" if text else "")
+    parts = [f"{n} {text or 'no state or location given'}" for text, n in groups.items()]
+    return f"{name} ×{count} ({'; '.join(parts)})"
+
+
+def sab_instruction_objects(instruction, description, vocabulary):
+    """[(name, line shown, found)] for every object type of `vocabulary` the instruction names.
+
+    `vocabulary`: every AI2-THOR object type of thor_workspaces.json, so an object missing from this
+    scene is still recognised (and shown as not found)."""
+    present = sab_present(description)
+    per_type = {}
+    for name, states, containers, _ in sab_objects(description):
+        per_type.setdefault(name, []).append((states, containers))
+    out = []
+    for name in sab_mentions(instruction, set(vocabulary) | set(present)):
+        if name in present:
+            if len(per_type.get(name, [])) != present[name]:
+                raise ValueError(f"{name}: {present[name]} instances listed, {len(per_type.get(name, []))} described")
+            out.append((name, sab_object_line(name, present[name], per_type[name]), True))
         else:
-            out.append(line.replace(" (", f" ×{n} (", 1) if " (" in line else f"{line} ×{n}")
-    return "\n".join(out)
+            out.append((name, f"{name}: {SAB_NOT_FOUND}", False))
+    return out
+
+
+def sab_vocabulary(thor_workspaces):
+    return sorted({name for d in thor_workspaces.values() for name in sab_present(d)})
+
+
+def sab_scene_name(description):
+    return description.split("\n", 1)[0].split("AI2-THOR scene:", 1)[1].strip()
 
 
 def context_text(task, dataset, thor_workspaces=None):
-    """The task context shown to annotators (and recorded in column F)."""
+    """The task context shown to annotators, as plain text (recorded in column F)."""
     if dataset == "SaGC":
         scene = task.get("scene", {})
         return (f"Robot Type: {task.get('task', '')}. "
@@ -199,9 +269,13 @@ def context_text(task, dataset, thor_workspaces=None):
                 f"Detected Objects: {', '.join(scene.get('objects', []))}. "
                 f"Detected People: {', '.join(scene.get('people', []))}.")
     if dataset == "AmbiK":
-        return str(task["environment_short"])
+        return f"{task['environment_short']}\n{AMBIK_ALWAYS_PRESENT}"
     if dataset == "SafeAgentBench":
-        return sab_compact(thor_workspaces[task["scene_name"]])
+        description = thor_workspaces[task["scene_name"]]
+        objs = sab_instruction_objects(instruction_text(task, dataset), description, sab_vocabulary(thor_workspaces))
+        lines = [f"Scene Name: {task['scene_name']}"]
+        lines += [line for _, line, _ in objs] or ["No task-specific objects identified."]
+        return "\n".join(lines)
     raise ValueError(dataset)
 
 
@@ -215,7 +289,7 @@ def instruction_text(task, dataset):
 
 
 def load_descriptions(path):
-    """{dataset: short description shown at dataset selection and above each item}."""
+    """{dataset: short description shown once, in a box, when a dataset is selected}."""
     with open(path, encoding="utf-8") as f:
         descriptions = json.load(f)["descriptions"]
     return {ds: str(descriptions[ds]) for ds in DATASETS}
@@ -229,7 +303,7 @@ def pad(row):
 
 def row_key(row):
     r = pad(row)
-    return (r[COL["Annotator_ID"]], r[COL["Dataset"]], r[COL["Task_ID"]], r[COL["Interface_Version"]])
+    return (normalize_id(r[COL["Annotator_ID"]]), r[COL["Dataset"]], r[COL["Task_ID"]], r[COL["Interface_Version"]])
 
 
 def find_row(values, key):
@@ -242,7 +316,7 @@ def find_row(values, key):
 
 def v2_rows(values, annotator_id):
     return [pad(r) for r in values[1:]
-            if pad(r)[COL["Annotator_ID"]] == annotator_id
+            if normalize_id(pad(r)[COL["Annotator_ID"]]) == annotator_id
             and pad(r)[COL["Interface_Version"]] == INTERFACE_VERSION]
 
 
@@ -253,8 +327,15 @@ def labeled_items(values, annotator_id):
 
 
 def training_done(values, annotator_id, training_version):
-    return any(r[COL["Dataset"]] == TRAINING_MARKER and r[COL["Training_Version"]] == training_version
-               for r in v2_rows(values, annotator_id))
+    """A training-complete row exists for this ID with the current Training_Version (any interface
+    version; ID cells normalized, cells compared as stripped text)."""
+    for r in values[1:]:
+        r = pad(r)
+        if (normalize_id(r[COL["Annotator_ID"]]) == normalize_id(annotator_id)
+                and r[COL["Dataset"]].strip() == TRAINING_MARKER
+                and r[COL["Training_Version"]].strip() == str(training_version).strip()):
+            return True
+    return False
 
 
 def header_update(header):
@@ -330,5 +411,5 @@ def allocation_row(annotator_id, subset, dataset, block, ids):
 
 
 def allocation_logged(values, annotator_id, subset_version, dataset, block):
-    return any(len(r) >= 6 and r[1] == annotator_id and r[2] == INTERFACE_VERSION
+    return any(len(r) >= 6 and normalize_id(r[1]) == annotator_id and r[2] == INTERFACE_VERSION
                and r[3] == str(subset_version) and r[4] == dataset and r[5] == str(block) for r in values[1:])
