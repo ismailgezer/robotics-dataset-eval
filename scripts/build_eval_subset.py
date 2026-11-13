@@ -17,9 +17,14 @@ Excluded, with reasons recorded in the output:
   the whole row (both forms) is excluded so the pair stays complete;
 - SaGC label 3; exact duplicates (same text shown and same scene) in every dataset.
 
-Blocks: items are dealt to blocks stratum by stratum (each stratum shuffled with the seed), so
-each stratum's count differs by at most 1 between blocks and block sizes differ by at most 1.
-Both forms of an AmbiK row are then moved into different blocks by swaps inside one stratum.
+Blocks (per dataset, version s2): each dataset has its own blocks of --block-size items (the
+last block holds the remainder). Within a dataset, the label strata (AmbiK: clear and the three
+ambiguity types; SaGC: clear, ambiguous, infeasible; SafeAgentBench: safe, unsafe) are each
+shuffled with the seed and interleaved by largest remaining deficit, so every prefix of the
+sequence (and so every block and every run of whole blocks from the start) is proportional
+by label to within one item per stratum. The sequence is cut into consecutive blocks. Both
+forms of an AmbiK row are then moved into different blocks by swapping clear forms between
+blocks (this keeps every block's label counts).
 
 Standard library only, so the output does not depend on numpy or pandas versions.
 """
@@ -114,8 +119,8 @@ def main(argv=None):
     ap.add_argument("--training", type=Path, default=ROOT / "training_tasks.json")
     ap.add_argument("--seed", type=int, default=20261113)
     ap.add_argument("--sab-size", type=int, default=120)
-    ap.add_argument("--block-size", type=int, default=50)
-    ap.add_argument("--version", default="s1", help="subset version recorded with every annotation")
+    ap.add_argument("--block-size", type=int, default=20)
+    ap.add_argument("--version", default="s2", help="subset version recorded with every annotation")
     ap.add_argument("--out", type=Path, default=ROOT / "eval_subset.json")
     ap.add_argument("--sab-ids-out", type=Path, help="also write the SafeAgentBench sample's IDs here")
     args = ap.parse_args(argv)
@@ -161,7 +166,8 @@ def main(argv=None):
             seen_ambik[(text.strip(), r["environment_short"].strip(), form)] = iid
             items.append({
                 "id": iid, "dataset": "AmbiK", "label": form, "ambiguity_type": r["ambiguity_type"],
-                "stratum": f"AmbiK/{form}/{r['ambiguity_type']}", "row": row,
+                "stratum": "AmbiK/clear" if form == "clear" else f"AmbiK/ambiguous/{r['ambiguity_type']}",
+                "row": row,
                 "pair": f"AmbiK_{row}_{'clear' if form == 'ambiguous' else 'ambiguous'}",
                 "forms_identical": r["ambiguous_task"].strip() == r["unambiguous_direct"].strip(),
                 "source_id": f"ambik-ambik_test_900-row_{row}_{form}", "text_sha1": text_sha1(text),
@@ -221,7 +227,8 @@ def main(argv=None):
         gt = r["ground_truth"]
         stratum = "SafeAgentBench/SAFE" if gt == "SAFE" else f"SafeAgentBench/UNSAFE/{sab_category(r.get('risk_category'))}"
         pool[stratum].append({
-            "id": iid, "dataset": "SafeAgentBench", "label": gt.lower(), "stratum": stratum,
+            "id": iid, "dataset": "SafeAgentBench", "label": gt.lower(), "sample_stratum": stratum,
+            "stratum": f"SafeAgentBench/{gt.lower()}",
             "risk_category": r.get("risk_category"), "row": i,
             "source_id": f"safeagentbench-mixed_detailed_1009-row_{i}", "text_sha1": text_sha1(r["instruction"]),
         })
@@ -233,49 +240,60 @@ def main(argv=None):
         sab_sample += [members[j] for j in picked]
     items += sab_sample
 
-    # --- Blocks ------------------------------------------------------------------------------
-    n_blocks = max(1, round(len(items) / args.block_size))
-    by_stratum = defaultdict(list)
-    for it in items:
-        by_stratum[it["stratum"]].append(it)
-    j = 0
-    for stratum in sorted(by_stratum):
-        members = by_stratum[stratum][:]
-        rng.shuffle(members)
-        for it in members:
-            it["block"] = j % n_blocks + 1
-            j += 1
-    # Both forms of an AmbiK row in different blocks: swap the clear form with another clear form
-    # of the same stratum (keeps every stratum's count per block).
+    # --- Blocks (per dataset) ----------------------------------------------------------------
     by_id = {it["id"]: it for it in items}
+    datasets = ["AmbiK", "SaGC", "SafeAgentBench"]
+    block_sizes, per_block, swaps = {}, {}, 0
+    for ds in datasets:
+        groups = defaultdict(list)
+        for it in items:
+            if it["dataset"] == ds:
+                groups[it["stratum"]].append(it)
+        names = sorted(groups)
+        for name in names:
+            rng.shuffle(groups[name])
+        total = sum(len(g) for g in groups.values())
+        taken = {name: 0 for name in names}
+        sequence = []
+        for t in range(total):
+            # largest deficit n_s*(t+1)/N - taken_s (integer form); ties: larger stratum, then name
+            best = max((name for name in names if taken[name] < len(groups[name])),
+                       key=lambda name: (len(groups[name]) * (t + 1) - taken[name] * total, len(groups[name]),
+                                         [-ord(ch) for ch in name]))
+            sequence.append(groups[best][taken[best]])
+            taken[best] += 1
+        for k, it in enumerate(sequence):
+            it["block"] = k // args.block_size + 1
+        if ds == "AmbiK":
+            def conflict(it, block):
+                p = by_id.get(it.get("pair"))
+                return p is not None and p["block"] == block
 
-    def conflict(it, block):
-        p = by_id.get(it.get("pair"))
-        return p is not None and p["block"] == block
+            clears = sorted((it for it in sequence if it["label"] == "clear"), key=lambda x: x["id"])
+            for it in clears:
+                if not conflict(it, it["block"]):
+                    continue
+                for other in clears:
+                    if other is it or other["block"] == it["block"]:
+                        continue
+                    if not conflict(it, other["block"]) and not conflict(other, it["block"]):
+                        it["block"], other["block"] = other["block"], it["block"]
+                        swaps += 1
+                        break
+                else:
+                    sys.exit(f"could not separate {it['id']} from its pair")
+            assert not any(conflict(it, it["block"]) for it in sequence)
+        n_blocks = max(it["block"] for it in sequence)
+        per_block[ds] = {b: dict(sorted(Counter(it["stratum"] for it in sequence if it["block"] == b).items()))
+                         for b in range(1, n_blocks + 1)}
+        block_sizes[ds] = {b: sum(c.values()) for b, c in per_block[ds].items()}
 
-    swaps = 0
-    for it in sorted(items, key=lambda x: x["id"]):
-        if it["dataset"] != "AmbiK" or it["label"] != "clear" or not conflict(it, it["block"]):
-            continue
-        for other in sorted(by_stratum[it["stratum"]], key=lambda x: x["id"]):
-            if other is it or other["block"] == it["block"]:
-                continue
-            if not conflict(it, other["block"]) and not conflict(other, it["block"]):
-                it["block"], other["block"] = other["block"], it["block"]
-                swaps += 1
-                break
-        else:
-            sys.exit(f"could not separate {it['id']} from its pair")
-    assert not any(it["dataset"] == "AmbiK" and conflict(it, it["block"]) for it in items)
-
-    items.sort(key=lambda x: (x["block"], x["dataset"], x["id"]))
-    per_block = {b: dict(sorted(Counter(it["stratum"] for it in items if it["block"] == b).items()))
-                 for b in range(1, n_blocks + 1)}
+    items.sort(key=lambda x: (datasets.index(x["dataset"]), x["block"], x["id"]))
     out = {
         "version": args.version,
-        "description": "Fixed evaluation subset of the label-evaluation interface v2. Every annotator "
-                       "labels the blocks in block order; within a block the order is a per-annotator "
-                       "shuffle (see app_user.py / rde_core.annotator_order).",
+        "description": "Fixed evaluation subset of the label-evaluation interface v2. Blocks per dataset; "
+                       "every annotator labels a dataset's blocks in block order, and within a block the "
+                       "order is a per-annotator shuffle (see rde_core.annotator_order).",
         "generator": "scripts/build_eval_subset.py",
         "command": f"python scripts/build_eval_subset.py --splits-dir <multivote-triage>/dataset/splits "
                    f"--seed {args.seed} --sab-size {args.sab_size} --block-size {args.block_size} "
@@ -286,17 +304,17 @@ def main(argv=None):
         "inputs_sha256": {p.name: sha256(p) for p in files.values()},
         "training_file_sha256": sha256(args.training) if Path(args.training).exists() else None,
         "n_items": len(items),
-        "n_blocks": n_blocks,
         "ambik_pair_swaps": swaps,
         "counts": dict(sorted(Counter(it["stratum"] for it in items).items())),
         "counts_by_dataset": dict(sorted(Counter(it["dataset"] for it in items).items())),
-        "block_sizes": {b: sum(c.values()) for b, c in per_block.items()},
+        "block_sizes": block_sizes,
         "per_block": per_block,
         "excluded": excluded,
         "items": items,
     }
     args.out.write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"{args.out}: {len(items)} items in {n_blocks} blocks; {len(excluded)} excluded; {swaps} pair swaps")
+    print(f"{args.out}: {len(items)} items; blocks per dataset "
+          f"{ {ds: len(b) for ds, b in block_sizes.items()} }; {len(excluded)} excluded; {swaps} pair swaps")
     print(json.dumps(out["counts_by_dataset"]))
 
     if args.sab_ids_out:
@@ -309,7 +327,7 @@ def main(argv=None):
             "subset_version": args.version,
             "seed": args.seed,
             "n_items": len(sab_sample),
-            "by_stratum": dict(sorted(Counter(it["stratum"] for it in sab_sample).items())),
+            "by_stratum": dict(sorted(Counter(it["sample_stratum"] for it in sab_sample).items())),
             "rows": sorted(it["row"] for it in sab_sample),
             "interface_task_ids": sorted((it["id"] for it in sab_sample), key=lambda s: int(s.split("_")[-1])),
             "item_ids": sorted((it["source_id"] for it in sab_sample), key=lambda s: int(s.split("_")[-1])),

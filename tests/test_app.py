@@ -81,8 +81,10 @@ def do_training(test, at, wrong=False):
 
 
 def current(at):
-    flat = [tid for _, ids in at.session_state["order"] for tid in ids]
-    return flat, flat[at.session_state["pos"]]
+    """(task ids of the selected dataset in the order shown, the current task id)."""
+    ds = at.session_state["dataset_choice"]
+    flat = [tid for _, tid in core.flat_order(at.session_state["order"], ds)]
+    return flat, flat[at.session_state["pos"][ds]]
 
 
 def submit_current(at, a=SIMPLE):
@@ -253,7 +255,7 @@ class TestTwoAnnotators(AppCase):
             done_b.append(submit_current(b))
         # bob also labels alice's first item: two rows for one item, none overwritten
         flat_b, _ = current(b)
-        b.session_state["pos"] = flat_b.index(done_a[0])
+        b.session_state["pos"] = dict(b.session_state["pos"], SaGC=flat_b.index(done_a[0]))
         b.run()
         submit_current(b)
         self.assertEqual(self.sheet.values[1], v1_row)  # v1 answer untouched
@@ -266,8 +268,9 @@ class TestTwoAnnotators(AppCase):
         # the same block, a different order for each annotator, each logged once
         alloc = self.book.sheets[core.ALLOC_SHEET].values
         self.assertEqual(alloc[0], core.ALLOC_HEADER)
-        logged = {(r[1], r[4]): json.loads(r[6]) for r in alloc[1:]}
+        logged = {(r[1], r[5]): json.loads(r[7]) for r in alloc[1:]}
         self.assertEqual(len(logged), len(alloc) - 1)
+        self.assertEqual({r[4] for r in alloc[1:]}, {"SaGC"})
         self.assertEqual(set(logged), {("alice", "1"), ("bob", "1")})
         self.assertEqual(sorted(logged[("alice", "1")]), sorted(logged[("bob", "1")]))
         self.assertNotEqual(logged[("alice", "1")], logged[("bob", "1")])
@@ -289,7 +292,7 @@ class TestResume(AppCase):
         self.assertFalse(any("Calibration Task" in m.value for m in r.markdown))
         flat, tid = current(r)
         self.assertEqual(flat[:3], done)
-        self.assertEqual(r.session_state["pos"], 3)
+        self.assertEqual(r.session_state["pos"]["SaGC"], 3)
         # going back shows the saved answers (fix D)
         r.button(key=f"prev_{tid}").click().run()
         self.assertEqual(current(r)[1], done[2])
@@ -304,12 +307,92 @@ class TestResume(AppCase):
         self.assertEqual(mine[0][9], core.SAFETY_OPTIONS[0])
         self.assertEqual(current(r)[1], flat[3])
         alloc = self.book.sheets[core.ALLOC_SHEET].values[1:]
-        self.assertEqual(len([x for x in alloc if x[1] == "alice" and x[4] == "1"]), 1)
+        self.assertEqual(len([x for x in alloc if x[1] == "alice" and x[4] == "SaGC" and x[5] == "1"]), 1)
 
     def test_new_training_version_requires_training_again(self):
         self.sheet.values.append(["alice", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 8 + ["v2", "t1"])
         at = login(new_app(), "alice")
         self.assertFalse(at.session_state["is_trained"])
+
+
+TARGETS = core.load_targets(ROOT / "study_config.json")
+SUBSET = json.loads((ROOT / "eval_subset.json").read_text(encoding="utf-8"))
+
+
+def v2_row(annotator, ds, tid):
+    return [annotator, ds, tid, "x", "x", "x", core.CLARITY_OPTIONS[0], "N/A", core.FEASIBILITY_OPTIONS[0],
+            core.SAFETY_OPTIONS[0], "", "v2", TRAINING_VERSION]
+
+
+def sidebar_text(at):
+    return " ".join(m.value for m in at.sidebar.markdown)
+
+
+class TestDatasets(AppCase):
+    def test_choose_and_switch_datasets(self):
+        at = do_training(self, login(new_app(), "alice"))
+        self.assertEqual(at.radio(key="dataset_choice").options, ["SaGC", "AmbiK", "SafeAgentBench"])
+        order = at.session_state["order"]
+        sagc1 = submit_current(at)
+        at.radio(key="dataset_choice").set_value("AmbiK").run()
+        flat, tid = current(at)
+        self.assertEqual(tid, flat[0])
+        self.assertTrue(tid.startswith("AmbiK_"))
+        self.assertEqual(flat, [t for _, t in core.flat_order(order, "AmbiK")])
+        ambik1 = submit_current(at)
+        at.radio(key="dataset_choice").set_value("SafeAgentBench").run()
+        self.assertTrue(current(at)[1].startswith("SafeAgentBench_"))
+        at.radio(key="dataset_choice").set_value("SaGC").run()
+        flat, tid = current(at)
+        self.assertEqual((flat[0], tid), (sagc1, flat[1]))           # SaGC resumes where it stopped
+        rows = {(r[1], r[2]) for r in self.rows("alice")}
+        self.assertTrue({("SaGC", sagc1), ("AmbiK", ambik1)} <= rows)
+
+    def test_progress_shows_targets_only(self):
+        at = do_training(self, login(new_app(), "alice"))
+        submit_current(at)
+        text = sidebar_text(at)
+        for ds in core.DATASETS:
+            self.assertIn(f"{ds}: {1 if ds == 'SaGC' else 0} of {TARGETS[ds]}", text)
+        heading = [m.value for m in at.markdown if m.value.startswith("### Evaluating")][0]
+        self.assertIn(f"1 of {TARGETS['SaGC']}", heading)
+        page = " ".join(m.value for m in at.markdown) + text
+        for hidden in ("472", "598", "1190", "Block", "block"):
+            self.assertNotIn(hidden, page)
+
+    def test_target_reached_then_optional_extras(self):
+        ds, target = "SafeAgentBench", TARGETS["SafeAgentBench"]
+        flat = [t for _, t in core.flat_order(core.annotator_order(SUBSET, "alice"), ds)]
+        self.sheet.values.append(["alice", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 7
+                                 + ["Completed calibration", "v2", TRAINING_VERSION])
+        self.sheet.values += [v2_row("alice", ds, t) for t in flat[:target - 1]]
+        at = login(new_app(), "alice")
+        at.radio(key="dataset_choice").set_value(ds).run()
+        self.assertEqual(current(at)[1], flat[target - 1])
+        self.assertIn(f"{ds}: {target - 1} of {target}", sidebar_text(at))
+        submit_current(at)
+        self.assertIn(f"You’ve completed the {ds} set, thank you!", texts(at.success))
+        self.assertIn(f"{ds}: {target} of {target}", sidebar_text(at))
+        at.button(key=f"extras_{ds}").click().run()
+        self.assertEqual(current(at)[1], flat[target])                # same fixed order, continued
+        self.assertTrue(any("optional extra items: 0" in m.value for m in at.markdown))
+        submit_current(at)
+        self.assertIn(f"{ds}: {target} of {target} · 1 extra", sidebar_text(at))
+        # a new session continues with the extras without asking again
+        r = login(new_app(), "alice")
+        r.radio(key="dataset_choice").set_value(ds).run()
+        self.assertEqual(current(r)[1], flat[target + 1])
+
+    def test_target_done_new_session_asks_again(self):
+        ds, target = "SafeAgentBench", TARGETS["SafeAgentBench"]
+        flat = [t for _, t in core.flat_order(core.annotator_order(SUBSET, "bob"), ds)]
+        self.sheet.values.append(["bob", core.TRAINING_MARKER, "PASSED"] + ["N/A"] * 7
+                                 + ["Completed calibration", "v2", TRAINING_VERSION])
+        self.sheet.values += [v2_row("bob", ds, t) for t in flat[:target]]
+        at = login(new_app(), "bob")
+        at.radio(key="dataset_choice").set_value(ds).run()
+        self.assertIn(f"You’ve completed the {ds} set, thank you!", texts(at.success))
+        self.assertTrue(at.button(key=f"extras_{ds}"))
 
 
 class TestRowCheck(unittest.TestCase):

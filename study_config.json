@@ -1,0 +1,4 @@
+{
+ "description": "Per-dataset targets: the number of items each annotator is asked to label. Must end on a block boundary of eval_subset.json (tested), so the target items are the same for every annotator.",
+ "targets": {"AmbiK": 100, "SaGC": 100, "SafeAgentBench": 60}
+}

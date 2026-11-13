@@ -5,8 +5,8 @@ Sheet layout (sheet1), one row per (annotator, dataset, task, interface version)
   G Clarity  H Ambiguity_Type  I Feasibility  J Safety  K Comments          (unchanged from v1)
   L Interface_Version  M Training_Version                                  (new in v2; empty = v1)
 
-Worksheet "allocations": one row per (annotator, interface version, subset version, block),
-with the item order shown to that annotator.
+Worksheet "allocations": one row per (annotator, interface version, subset version, dataset,
+block), with the item order shown to that annotator.
 """
 import hashlib
 import json
@@ -22,8 +22,9 @@ COL = {name: i for i, name in enumerate(
      "Ambiguity_Type", "Feasibility", "Safety", "Comments", "Interface_Version", "Training_Version"])}
 N_COLS = len(COL)
 ALLOC_SHEET = "allocations"
-ALLOC_HEADER = ["Timestamp_UTC", "Annotator_ID", "Interface_Version", "Subset_Version", "Block",
-                "Seed", "Order"]
+ALLOC_HEADER = ["Timestamp_UTC", "Annotator_ID", "Interface_Version", "Subset_Version", "Dataset",
+                "Block", "Seed", "Order"]
+DATASETS = ["SaGC", "AmbiK", "SafeAgentBench"]  # the dataset selector's order (as in v1)
 
 # Option texts: identical to v1 (including the double spaces), so v1 and v2 answers compare.
 CLARITY_OPTIONS = [
@@ -174,36 +175,65 @@ def header_update(header):
 
 
 # --- Order ------------------------------------------------------------------------------------
-def block_seed(subset_seed, annotator_id, block):
-    digest = hashlib.sha256(f"{subset_seed}|{annotator_id}|{block}".encode()).hexdigest()
+def block_seed(subset_seed, annotator_id, dataset, block):
+    digest = hashlib.sha256(f"{subset_seed}|{annotator_id}|{dataset}|{block}".encode()).hexdigest()
     return int(digest[:16], 16)
 
 
 def annotator_order(subset, annotator_id):
-    """[(block, [item ids in the order shown])]: blocks in order, each shuffled per annotator.
+    """{dataset: [(block, [item ids in the order shown])]}: every annotator gets the same blocks in
+    the same order within a dataset; each block is shuffled with a seed from the annotator ID.
 
     The two forms of an AmbiK task are in different blocks (eval_subset.json); if they would meet
     at a block boundary, the next block's first item is swapped with its second.
     """
     pair = {it["id"]: it.get("pair") for it in subset["items"]}
-    blocks = sorted({it["block"] for it in subset["items"]})
-    out, last = [], None
-    for b in blocks:
-        ids = sorted(it["id"] for it in subset["items"] if it["block"] == b)
-        random.Random(block_seed(subset["seed"], annotator_id, b)).shuffle(ids)
-        if last is not None and len(ids) > 1 and pair.get(ids[0]) == last:
-            ids[0], ids[1] = ids[1], ids[0]
-        out.append((b, ids))
-        last = ids[-1] if ids else last
+    out = {}
+    for ds in DATASETS:
+        items = [it for it in subset["items"] if it["dataset"] == ds]
+        blocks, last = [], None
+        for b in sorted({it["block"] for it in items}):
+            ids = sorted(it["id"] for it in items if it["block"] == b)
+            random.Random(block_seed(subset["seed"], annotator_id, ds, b)).shuffle(ids)
+            if last is not None and len(ids) > 1 and pair.get(ids[0]) == last:
+                ids[0], ids[1] = ids[1], ids[0]
+            blocks.append((b, ids))
+            last = ids[-1] if ids else last
+        out[ds] = blocks
     return out
 
 
-def allocation_row(annotator_id, subset, block, ids):
+def flat_order(order, dataset):
+    """[(block, task id)] of one dataset in the order shown."""
+    return [(b, tid) for b, ids in order[dataset] for tid in ids]
+
+
+def load_targets(path):
+    """{dataset: number of items each annotator is asked to label}."""
+    with open(path, encoding="utf-8") as f:
+        targets = json.load(f)["targets"]
+    return {ds: int(targets[ds]) for ds in DATASETS}
+
+
+def progress(flat, answers, target):
+    """(answered among the first `target` items, answered beyond them)."""
+    ids = [tid for _, tid in flat]
+    return (sum(1 for tid in ids[:target] if tid in answers),
+            sum(1 for tid in ids[target:] if tid in answers))
+
+
+def next_open(flat, answers, target, extras):
+    """Index of the next unanswered item: within the target, or anywhere once extras are chosen."""
+    limit = len(flat) if extras else min(target, len(flat))
+    return next((i for i in range(limit) if flat[i][1] not in answers), None)
+
+
+def allocation_row(annotator_id, subset, dataset, block, ids):
     return [datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), annotator_id, INTERFACE_VERSION,
-            str(subset["version"]), str(block), str(block_seed(subset["seed"], annotator_id, block)),
-            json.dumps(ids)]
+            str(subset["version"]), dataset, str(block),
+            str(block_seed(subset["seed"], annotator_id, dataset, block)), json.dumps(ids)]
 
 
-def allocation_logged(values, annotator_id, subset_version, block):
-    return any(len(r) >= 5 and r[1] == annotator_id and r[2] == INTERFACE_VERSION
-               and r[3] == str(subset_version) and r[4] == str(block) for r in values[1:])
+def allocation_logged(values, annotator_id, subset_version, dataset, block):
+    return any(len(r) >= 6 and r[1] == annotator_id and r[2] == INTERFACE_VERSION
+               and r[3] == str(subset_version) and r[4] == dataset and r[5] == str(block) for r in values[1:])

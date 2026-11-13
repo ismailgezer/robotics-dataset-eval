@@ -19,6 +19,7 @@ AMBIK_SUBSET = "ambik_test_900.csv"
 SAFE_SUBSET = "mixed_detailed_1009.jsonl"
 TRAINING_FILE = "training_tasks.json"
 EVAL_SUBSET = "eval_subset.json"
+STUDY_CONFIG = "study_config.json"
 
 SHEET_ERROR = ("The results sheet could not be reached. Nothing was saved. "
                "Please try again in a minute; if it keeps failing, contact the study team.")
@@ -102,12 +103,12 @@ def allocation_worksheet(sh):
         return ws
 
 
-def log_block_order(sh, annotator_id, subset, block, ids):
-    """One allocations row per (annotator, interface, subset version, block)."""
+def log_block_order(sh, annotator_id, subset, dataset, block, ids):
+    """One allocations row per (annotator, interface, subset version, dataset, block)."""
     try:
         ws = allocation_worksheet(sh)
-        if not core.allocation_logged(read_values(ws), annotator_id, subset["version"], block):
-            ws.append_row(core.allocation_row(annotator_id, subset, block, ids), value_input_option="RAW")
+        if not core.allocation_logged(read_values(ws), annotator_id, subset["version"], dataset, block):
+            ws.append_row(core.allocation_row(annotator_id, subset, dataset, block, ids), value_input_option="RAW")
     except core.SheetError:
         raise
     except Exception as e:
@@ -566,15 +567,16 @@ def sign_in(typed_id, subset, training_version):
     st.session_state.answers = {tid: answers_from_row(row) for (_, tid), row in labeled.items()}
     st.session_state.welcome = core.welcome_message(annotator_id, len(st.session_state.answers))
     st.session_state.order = core.annotator_order(subset, annotator_id)
-    st.session_state.pos = None
+    st.session_state.pos = {}
+    # an annotator who already answered optional extra items continues with them
+    targets = core.load_targets(STUDY_CONFIG)
+    st.session_state.extras = {
+        ds: core.progress(core.flat_order(st.session_state.order, ds), st.session_state.answers, targets[ds])[1] > 0
+        for ds in core.DATASETS}
     st.session_state.logged_blocks = set()
     st.session_state.train_idx = 0
     st.session_state.show_feedback = False
     return None
-
-
-def first_open(flat, answers):
-    return next((i for i, (_, tid) in enumerate(flat) if tid not in answers), None)
 
 
 # --- Main Application Session ---
@@ -584,6 +586,7 @@ def main():
         subset, items = load_subset_items()
         training_version, train_tasks = core.load_training(TRAINING_FILE)
         instructions = core.load_instructions(TRAINING_FILE)
+        targets = core.load_targets(STUDY_CONFIG)
     except Exception:
         log.exception("loading the task files failed")
         st.error("The task files could not be loaded. Please contact the study team.")
@@ -628,46 +631,63 @@ def main():
         return
 
     order = st.session_state.order
-    flat = [(b, tid) for b, ids in order for tid in ids]
     answers = st.session_state.answers
-    if st.session_state.pos is None:
-        st.session_state.pos = first_open(flat, answers)
-    pos = st.session_state.pos
-    n_done = sum(1 for _, tid in flat if tid in answers)
-    st.sidebar.progress(n_done / len(flat), text=f"{n_done} of {len(flat)} items done")
+    extras = st.session_state.extras
+    st.sidebar.divider()
+    dataset_choice = st.sidebar.radio("Select Dataset to Evaluate:", core.DATASETS, key="dataset_choice")
+    for ds in core.DATASETS:
+        done, extra = core.progress(core.flat_order(order, ds), answers, targets[ds])
+        line = f"{ds}: {done} of {targets[ds]}" + (f" · {extra} extra" if extra else "")
+        st.sidebar.markdown(f"**{line}**")
+
+    flat = core.flat_order(order, dataset_choice)
+    target = min(targets[dataset_choice], len(flat))
+    done, extra = core.progress(flat, answers, target)
+    pos_map = st.session_state.pos
+    if pos_map.get(dataset_choice) is None:
+        pos_map[dataset_choice] = core.next_open(flat, answers, target, extras[dataset_choice])
+    pos = pos_map[dataset_choice]
 
     if pos is None:
-        st.success("🎉 You have completed every item. Thank you!")
+        if not extras[dataset_choice] and core.next_open(flat, answers, target, True) is not None:
+            st.success(f"You’ve completed the {dataset_choice} set, thank you!")
+            if st.button("Continue with optional extra items", key=f"extras_{dataset_choice}"):
+                extras[dataset_choice] = True
+                pos_map[dataset_choice] = core.next_open(flat, answers, target, True)
+                st.rerun()
+        else:
+            st.success(f"🎉 You have completed every {dataset_choice} item. Thank you!")
         return
 
     block, task_id = flat[pos]
-    block_ids = dict(order)[block]
-    if block not in st.session_state.logged_blocks:
+    block_ids = dict(order[dataset_choice])[block]
+    if (dataset_choice, block) not in st.session_state.logged_blocks:
         try:
-            log_block_order(sh, annotator_id, subset, block, block_ids)
+            log_block_order(sh, annotator_id, subset, dataset_choice, block, block_ids)
         except core.SheetError:
             st.error(SHEET_ERROR)
             st.stop()
-        st.session_state.logged_blocks.add(block)
+        st.session_state.logged_blocks.add((dataset_choice, block))
 
-    meta = next(it for it in subset["items"] if it["id"] == task_id)
-    dataset_choice = meta["dataset"]
     current_task = items[task_id]
-    st.markdown(f"### Block {block} of {len(order)} · item {block_ids.index(task_id) + 1} of {len(block_ids)} "
-                f"({dataset_choice})")
-    st.caption("You can stop at any time; your answers are saved and you continue where you left off.")
+    heading = f"### Evaluating **{dataset_choice}** · {done} of {target}"
+    if extras[dataset_choice]:
+        heading += f" · optional extra items: {extra}"
+    st.markdown(heading)
+    st.caption("You can stop at any time or switch datasets; your answers are saved and you continue where you left off.")
     render_instructions(instructions)
 
     # Navigation Bar
     nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
     with nav_col1:
         if st.button("⬅️ Previous Task", disabled=(pos == 0), key=f"prev_{task_id}"):
-            st.session_state.pos -= 1
+            pos_map[dataset_choice] = pos - 1
             st.rerun()
     with nav_col3:
-        if st.button("Next Task ➡️", disabled=(task_id not in answers or pos >= len(flat) - 1),
+        last = (len(flat) if extras[dataset_choice] else target) - 1
+        if st.button("Next Task ➡️", disabled=(task_id not in answers or pos >= last),
                      key=f"next_{task_id}"):
-            st.session_state.pos += 1
+            pos_map[dataset_choice] = pos + 1
             st.rerun()
 
     # 1. Render Task Display
@@ -699,7 +719,7 @@ def main():
                             ("clarity", "ambiguity_types", "feasibility", "safety", "comments")}
         st.toast("Response saved to database!", icon="✅")
         st.session_state.welcome = None
-        st.session_state.pos = first_open(flat, answers)
+        pos_map[dataset_choice] = core.next_open(flat, answers, target, extras[dataset_choice])
         st.rerun()
 
 

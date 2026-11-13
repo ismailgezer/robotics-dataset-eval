@@ -38,6 +38,7 @@ def dataset_text():
 
 
 TEXT = dataset_text()
+S1_ITEMS_SHA256 = "8b14b05d0d5acebb015a8e3fd10a06e47b13d2815a35f168479f1df4ee6aff50"
 KITCHEN = ("Assume a standard kitchen: common appliances (stove, oven, microwave, sink, fridge) are "
            "available even if not listed.")
 
@@ -96,26 +97,48 @@ class TestSubset(unittest.TestCase):
         for it in self.items:
             self.assertEqual(hashlib.sha1(TEXT[it["id"]].encode()).hexdigest(), it["text_sha1"], it["id"])
 
-    def test_sizes(self):
+    def test_same_items_as_s1(self):
+        # s2 changed only the blocks: the items are those of s1 (2d4ceef), by fingerprint
+        ids = "\n".join(sorted(it["id"] for it in self.items))
+        self.assertEqual(hashlib.sha256(ids.encode()).hexdigest(), S1_ITEMS_SHA256)
+        self.assertEqual(SUBSET["version"], "s2")
+
+    def test_blocks_per_dataset(self):
         self.assertEqual(len(self.items), SUBSET["n_items"])
-        sizes = Counter(it["block"] for it in self.items)
-        self.assertEqual(len(sizes), SUBSET["n_blocks"])
-        self.assertLessEqual(max(sizes.values()) - min(sizes.values()), 1)
         self.assertEqual(Counter(it["dataset"] for it in self.items)["SafeAgentBench"],
                          SUBSET["parameters"]["sab_size"])
+        size = SUBSET["parameters"]["block_size"]
+        for ds in core.DATASETS:
+            sizes = Counter(it["block"] for it in self.items if it["dataset"] == ds)
+            blocks = sorted(sizes)
+            self.assertEqual(blocks, list(range(1, len(blocks) + 1)), ds)
+            self.assertTrue(all(sizes[b] == size for b in blocks[:-1]), ds)   # 20 each; the last holds the rest
+            self.assertLessEqual(sizes[blocks[-1]], size, ds)
 
-    def test_every_stratum_balanced_across_blocks(self):
-        blocks = range(1, SUBSET["n_blocks"] + 1)
-        for stratum in {it["stratum"] for it in self.items}:
-            per = [sum(1 for it in self.items if it["stratum"] == stratum and it["block"] == b) for b in blocks]
-            self.assertLessEqual(max(per) - min(per), 1, stratum)
+    def test_every_block_balanced_by_label(self):
+        for ds in core.DATASETS:
+            its = [it for it in self.items if it["dataset"] == ds]
+            share = {k: v / len(its) for k, v in Counter(it["stratum"] for it in its).items()}
+            for b in {it["block"] for it in its}:
+                block = [it for it in its if it["block"] == b]
+                counts = Counter(it["stratum"] for it in block)
+                for stratum, p in share.items():
+                    self.assertLess(abs(counts[stratum] - p * len(block)), 2, (ds, b, stratum))
+
+    def test_strata(self):
+        expected = {"AmbiK": {"AmbiK/clear", "AmbiK/ambiguous/preferences",
+                              "AmbiK/ambiguous/common_sense_knowledge", "AmbiK/ambiguous/safety"},
+                    "SaGC": {"SaGC/clear", "SaGC/ambiguous", "SaGC/infeasible"},
+                    "SafeAgentBench": {"SafeAgentBench/safe", "SafeAgentBench/unsafe"}}
+        for ds, strata in expected.items():
+            self.assertEqual({it["stratum"] for it in self.items if it["dataset"] == ds}, strata)
 
     def test_ambik_both_forms_in_different_blocks(self):
         by_id = {it["id"]: it for it in self.items}
         ambik = [it for it in self.items if it["dataset"] == "AmbiK"]
         for it in ambik:
             self.assertIn(it["pair"], by_id, it["id"])  # both forms present
-            self.assertNotEqual(it["block"], by_id[it["pair"]]["block"], it["id"])
+            self.assertNotEqual(it["block"], by_id[it["pair"]]["block"], it["id"])   # blocks are per dataset
 
     def test_exclusions(self):
         ids = {it["id"] for it in self.items}
@@ -145,17 +168,53 @@ class TestOrder(unittest.TestCase):
         self.assertEqual(a1, a2)
         b = core.annotator_order(SUBSET, "bob")
         self.assertNotEqual(a1, b)
-        self.assertEqual([blk for blk, _ in a1], list(range(1, SUBSET["n_blocks"] + 1)))
-        for (blk, ids_a), (_, ids_b) in zip(a1, b):
-            self.assertEqual(sorted(ids_a), sorted(ids_b))  # same blocks, own order
-            self.assertEqual(set(ids_a), {it["id"] for it in SUBSET["items"] if it["block"] == blk})
+        for ds in core.DATASETS:
+            items = [it for it in SUBSET["items"] if it["dataset"] == ds]
+            self.assertEqual([blk for blk, _ in a1[ds]], sorted({it["block"] for it in items}))
+            for (blk, ids_a), (_, ids_b) in zip(a1[ds], b[ds]):
+                self.assertEqual(sorted(ids_a), sorted(ids_b))  # same blocks, own order
+                self.assertEqual(set(ids_a), {it["id"] for it in items if it["block"] == blk})
 
     def test_no_ambik_pair_back_to_back(self):
         pair = {it["id"]: it.get("pair") for it in SUBSET["items"]}
         for name in [f"annotator{i}" for i in range(200)]:
-            flat = [tid for _, ids in core.annotator_order(SUBSET, name) for tid in ids]
+            flat = [tid for _, tid in core.flat_order(core.annotator_order(SUBSET, name), "AmbiK")]
             for x, y in zip(flat, flat[1:]):
                 self.assertNotEqual(pair.get(x), y, (name, x, y))
+
+
+class TestTargets(unittest.TestCase):
+    targets = core.load_targets(ROOT / "study_config.json")
+
+    def test_values(self):
+        self.assertEqual(self.targets, {"AmbiK": 100, "SaGC": 100, "SafeAgentBench": 60})
+
+    def test_target_ends_on_a_block_boundary(self):
+        for ds, target in self.targets.items():
+            sizes = Counter(it["block"] for it in SUBSET["items"] if it["dataset"] == ds)
+            ends = [sum(sizes[b] for b in range(1, k + 1)) for k in range(1, len(sizes) + 1)]
+            self.assertIn(target, ends, ds)
+
+    def test_first_target_items_same_for_everyone_and_balanced(self):
+        for ds, target in self.targets.items():
+            sets = {frozenset(t for _, t in core.flat_order(core.annotator_order(SUBSET, name), ds)[:target])
+                    for name in [f"annotator{i}" for i in range(50)] + ["alice", "bob"]}
+            self.assertEqual(len(sets), 1, ds)
+            first = next(iter(sets))
+            self.assertEqual(len(first), target)
+            its = [it for it in SUBSET["items"] if it["dataset"] == ds]
+            total = Counter(it["stratum"] for it in its)
+            got = Counter(it["stratum"] for it in its if it["id"] in first)
+            for stratum, n in total.items():
+                self.assertLess(abs(got[stratum] - target * n / len(its)), 1, (ds, stratum, got[stratum]))
+
+    def test_progress_and_next_open(self):
+        flat = [(1, "a"), (1, "b"), (2, "c"), (2, "d")]
+        self.assertEqual(core.progress(flat, {"a": 1, "c": 1}, 2), (1, 1))
+        self.assertEqual(core.next_open(flat, {"a": 1}, 2, False), 1)
+        self.assertIsNone(core.next_open(flat, {"a": 1, "b": 1}, 2, False))
+        self.assertEqual(core.next_open(flat, {"a": 1, "b": 1}, 2, True), 2)
+        self.assertIsNone(core.next_open(flat, dict.fromkeys("abcd", 1), 2, True))
 
 
 class TestTraining(unittest.TestCase):
