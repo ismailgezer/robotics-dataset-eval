@@ -1,6 +1,6 @@
 """Tests of rde_core, eval_subset.json and training_tasks.json (no Streamlit runtime needed).
 
-Run from the repository root:  python -m unittest discover -s tests -t . -v
+Run from the repository root:  python -m unittest discover -s tests -v
 Optional: MVT_DIR=<multivote-triage checkout> also checks the training set against its split
 files and DATA_ISSUES.md appendices.
 """

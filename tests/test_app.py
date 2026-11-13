@@ -1,6 +1,6 @@
 """End-to-end tests of app_user.py with Streamlit's AppTest and an in-memory fake Sheet.
 
-Run from the repository root:  python -m unittest discover -s tests -t . -v
+Run from the repository root:  python -m unittest discover -s tests -v
 Nothing here opens a network connection: gspread's constructors are replaced by tests/fake_sheet.py.
 """
 import json
