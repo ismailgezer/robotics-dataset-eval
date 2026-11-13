@@ -1,0 +1,26 @@
+# --- Secrets: never commit. Keys, access codes and the Sheet URL live only in Streamlit secrets. ---
+.streamlit/secrets.toml
+*secrets*.toml
+service_account*.json
+*service_account*.json
+*credentials*.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# --- Labels and Sheet exports: never commit. Answers stay in the Google Sheet. ---
+*.xlsx
+*.xls
+*.ods
+*.tsv
+*.csv
+!/ambik_test_900.csv
+exports/
+*labels*.jsonl
+*.report.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]

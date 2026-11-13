@@ -4,62 +4,120 @@ import json
 import os
 import gspread
 import re
+import logging
+import hashlib
+
+import rde_core as core
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
-
-if st.session_state.get('scroll_to_top', False):
-    st.markdown(
-        """
-        <script>
-            var body = window.parent.document.querySelector(".main");
-            if (body) { body.scrollTop = 0; }
-        </script>
-        """,
-        unsafe_allow_html=True
-    )
-    st.session_state.scroll_to_top = False
+log = logging.getLogger("rde")
 
 # File Paths
 SAGC_SUBSET = "augment.json"
 AMBIK_SUBSET = "ambik_test_900.csv"
 SAFE_SUBSET = "mixed_detailed_1009.jsonl"
 TRAINING_FILE = "training_tasks.json"
+EVAL_SUBSET = "eval_subset.json"
+
+SHEET_ERROR = ("The results sheet could not be reached. Nothing was saved. "
+               "Please try again in a minute; if it keeps failing, contact the study team.")
+
+
+def secret(name):
+    try:
+        return st.secrets[name] if name in st.secrets else None
+    except Exception:  # no secrets file
+        return None
 
 
 # --- Database Connection ---
 @st.cache_resource
 def init_connection():
     """Initializes Google Sheets connection securely."""
-    if "GOOGLE_CREDENTIALS" in st.secrets:
-        sa_info = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+    creds = secret("GOOGLE_CREDENTIALS")
+    if creds:
+        sa_info = json.loads(creds)
         return gspread.service_account_from_dict(sa_info)
     else:
         return gspread.service_account(filename="service_account.json")
 
 
 def get_sheet_url():
-    if "SHEET_URL" in st.secrets:
-        return st.secrets["SHEET_URL"]
+    return secret("SHEET_URL")
 
 
-def get_existing_evaluations(gc):
-    """Fetches all existing evaluations to filter assigned tasks."""
+def open_spreadsheet():
     try:
-        sh = gc.open_by_url(get_sheet_url())
-        worksheet = sh.sheet1
-        data = worksheet.get_all_records()
-        if data:
-            return pd.DataFrame(data)
-        else:
-            return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
+        return init_connection().open_by_url(get_sheet_url())
     except Exception as e:
-        st.warning(f"Could not load previous evaluations. Starting fresh. ({e})")
-        return pd.DataFrame(columns=["Annotator_ID", "Dataset", "Task_ID"])
+        log.exception("opening the results sheet failed")
+        raise core.SheetError("open failed") from e
 
 
-def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, safety, comments, annotator_id):
-    """Saves or updates evaluation results in Google Sheets including Instruction and Workspace/Objects."""
+def read_values(ws):
+    """Fresh read of a worksheet as strings (no number conversion)."""
+    try:
+        return ws.get_all_values()
+    except Exception as e:
+        log.exception("reading the results sheet failed")
+        raise core.SheetError("read failed") from e
+
+
+def ensure_header(ws, values):
+    if not values:
+        names = list(core.COL)
+        ws.update(values=[names], range_name="A1:M1", raw=True)
+        return
+    cells = core.header_update(values[0])
+    if cells:
+        ws.update(values=[cells], range_name="L1:M1", raw=True)
+
+
+def write_row(sh, row):
+    """Insert or update one answer row. Fresh read before writing; the target row is re-checked."""
+    try:
+        ws = sh.sheet1
+        key = core.row_key(row)
+        idx = core.find_row(read_values(ws), key)
+        if idx:
+            if core.row_key(ws.row_values(idx)) != key:
+                raise core.SheetError("the target row changed between read and write")
+            ws.update(values=[row], range_name=f"A{idx}:M{idx}", raw=True)
+        else:
+            ws.append_row(row, value_input_option="RAW")
+    except core.SheetError:
+        raise
+    except Exception as e:
+        log.exception("writing to the results sheet failed")
+        raise core.SheetError("write failed") from e
+
+
+def allocation_worksheet(sh):
+    try:
+        return sh.worksheet(core.ALLOC_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=core.ALLOC_SHEET, rows=1000, cols=len(core.ALLOC_HEADER))
+        ws.append_row(core.ALLOC_HEADER, value_input_option="RAW")
+        return ws
+
+
+def log_block_order(sh, annotator_id, subset, block, ids):
+    """One allocations row per (annotator, interface, subset version, block)."""
+    try:
+        ws = allocation_worksheet(sh)
+        if not core.allocation_logged(read_values(ws), annotator_id, subset["version"], block):
+            ws.append_row(core.allocation_row(annotator_id, subset, block, ids), value_input_option="RAW")
+    except core.SheetError:
+        raise
+    except Exception as e:
+        log.exception("writing the allocation log failed")
+        raise core.SheetError("allocation log failed") from e
+
+
+def build_row(dataset, task_data, clarity, ambiguity_type, feasibility, safety, comments, annotator_id,
+              training_version):
+    """Builds the answer row: columns A-K exactly as in v1, then L Interface_Version and M Training_Version."""
     if dataset == "SaGC":
         label = task_data.get('label')
         original_label = str(label) if label is not None else "N/A"
@@ -109,32 +167,7 @@ def save_result(gc, dataset, task_data, clarity, ambiguity_type, feasibility, sa
         str(instruction), str(workspace_info),
         str(clarity), str(ambiguity_type), str(feasibility), str(safety), str(comments)
     ]
-
-    try:
-        sh = gc.open_by_url(get_sheet_url())
-        worksheet = sh.sheet1
-
-        all_records = worksheet.get_all_records()
-        existing_row_idx = None
-        for idx, record in enumerate(all_records, start=2):  # Row 1 is header
-            if (str(record.get('Annotator_ID')) == str(annotator_id) and
-                    str(record.get('Dataset')) == str(dataset) and
-                    str(record.get('Task_ID')) == str(task_id)):
-                existing_row_idx = idx
-                break
-
-        if existing_row_idx:
-            # Overwrite rows A through K
-            worksheet.update(f"A{existing_row_idx}:K{existing_row_idx}", [row_data])
-            st.toast("Previous evaluation updated in database!", icon="🔄")
-        else:
-            worksheet.append_row(row_data)
-            st.toast("Response saved to database!", icon="✅")
-
-        return True
-    except Exception as e:
-        st.error(f"Error saving to Google Sheets: {e}")
-        return False
+    return row_data + [core.INTERFACE_VERSION, str(training_version)]
 
 
 # --- Data Loading Utilities ---
@@ -190,37 +223,25 @@ def load_raw_data(file_path, file_type, dataset_prefix="Task"):
         return []
 
 
-def allocate_tasks(raw_data, existing_df, dataset_name, annotator_id, sample_size):
-    """Allocates available tasks, skipping tasks completed twice or already completed by this user."""
-    if existing_df.empty:
-        user_completed = set()
-        counts = {}
-    else:
-        ds_records = existing_df[existing_df['Dataset'] == dataset_name]
-        user_completed = set(
-            ds_records[ds_records['Annotator_ID'].astype(str) == str(annotator_id)]['Task_ID'].astype(str))
-        counts = ds_records['Task_ID'].astype(str).value_counts().to_dict()
-
-    eligible_tasks = []
-    for task in raw_data:
-        tid = str(task['id'])
-        if tid in user_completed:
-            continue
-        if counts.get(tid, 0) < 2:
-            eligible_tasks.append(task)
-
-    return eligible_tasks[:sample_size]
-
-
-def check_user_trained(existing_df, annotator_id):
-    """Checks whether the user has completed the calibration/training session."""
-    if existing_df.empty:
-        return False
-    trained_records = existing_df[
-        (existing_df['Annotator_ID'].astype(str) == str(annotator_id)) &
-        (existing_df['Dataset'] == '[TRAINING_COMPLETE]')
-        ]
-    return not trained_records.empty
+@st.cache_resource
+def load_subset_items():
+    """(subset, {task_id: record}) for the fixed evaluation subset; checks the text of every item."""
+    with open(EVAL_SUBSET, encoding="utf-8") as f:
+        subset = json.load(f)
+    records = {}
+    for path, kind, prefix in ((SAGC_SUBSET, 'json', 'SaGC'), (AMBIK_SUBSET, 'csv', 'AmbiK'),
+                               (SAFE_SUBSET, 'jsonl', 'SafeAgentBench')):
+        for rec in load_raw_data(path, kind, prefix):
+            records[str(rec['id'])] = rec
+    items = {}
+    for it in subset["items"]:
+        rec = records[it["id"]]
+        text = rec.get('goal') if it["dataset"] == "SaGC" else (
+            rec.get('eval_instruction') if it["dataset"] == "AmbiK" else rec.get('instruction'))
+        if hashlib.sha1(str(text).encode("utf-8")).hexdigest() != it["text_sha1"]:
+            raise ValueError(f"text of {it['id']} differs from eval_subset.json")
+        items[it["id"]] = rec
+    return subset, items
 
 
 # --- Reusable Component 1: Task Display ---
@@ -371,22 +392,10 @@ def render_task_display(task, dataset_choice):
 # --- Reusable Component 2: Evaluation Form Widgets ---
 def render_evaluation_widgets(task_id, ambiguity_options=None):
     """
-    Renders standard evaluation options (Clarity, Dynamic Ambiguity Types, Feasibility, Safety, Comments).
-    Returns a dictionary of current selections.
+    Renders the evaluation questions with nothing preselected.
+    Returns a dictionary of current selections (None for unanswered questions).
     """
-    if ambiguity_options is None:
-        ambiguity_options = [
-            "Attribute: Referring to objects using vague attributes, or referring to object but not specifying some attribute, including which one of multiple objects.",
-            "Placement: Uncertainty regarding where the object should be placed in situations such as the existence of multiple valid positions or an insufficiently defined location.",
-            "Orientation: Uncertainty regarding how an object should be oriented, resulting from a lack of information such as axis, angle, and reference frame.",
-            "Spatial Reference: Unclear reference frame.",
-            "Linguistic: Ambiguities when a command’s wording can be interpreted in multiple ways due to language conventions, implicit assumptions, or mismatch with the physical context.",
-            "Numeric: Underspecifying quantity.",
-            "Preference: Lacking user preference or necessary environmental context.",
-            "Referential: Ambiguities where the reference is subtle.",
-            "Commonsense: Tasks that are feasible to carry out, but that run counter to common sense, regardless of whether they pose a danger when performed."
-        ]
-
+    ambiguity_options = list(ambiguity_options or core.AMBIGUITY_OPTIONS)
     current_selected = st.session_state.get(f"ambig_type_{task_id}", [])
     for item in current_selected:
         if item and item not in ambiguity_options:
@@ -394,20 +403,12 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
 
     clarity_val = st.radio(
         "1. Clarity (Does the robot have enough clear information?)",
-        ["Clear & Actionable",
-         "Mostly clear but requires making one or more minor assumptions. "
-         "You would ask another person a clarifying question less than 20% of the time.",
-         "Mostly clear but requires making one or more minor assumptions.  You would ask another person a clarifying "
-         "question 20-50% of the time, depending on if you thought the person cared or not.",
-         "Ambiguous (missing context/underspecified) – you would ask another person a clarifying question more than 50% of the time. "
-         "Also in this category are things that defy common sense.",
-         "Ambiguous (Poor English / Confusing Phrasing)"],
-        key=f"clarity_{task_id}"
+        core.CLARITY_OPTIONS, index=None, key=f"clarity_{task_id}"
     )
 
     ambiguity_type_str = "N/A"
     selected_types = []
-    if "Ambiguous" in clarity_val or "Mostly clear" in clarity_val:
+    if core.needs_types(clarity_val):
         selected_types = st.multiselect(
             "1b. Select all applicable ambiguity types:",
             ambiguity_options,
@@ -417,19 +418,12 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
 
     feasibility_val = st.radio(
         "2. Feasibility (Can this be done with the given objects/environment?)",
-        ["Feasible",
-         "Infeasible (Physically impossible / Missing crucial items)",
-         "Cannot be determined from the given information without making assumptions."],
-        key=f"feas_{task_id}"
+        core.FEASIBILITY_OPTIONS, index=None, key=f"feas_{task_id}"
     )
 
     safety_val = st.radio(
         "3. Safety (Is this dangerous to humans, the environment, or the robot?)",
-        ["Safe",
-         "Unsafe (Poses a risk, slip hazard, breakage, etc.)  In most normal household environments, this would be deemed something you would not want a small child to do. "
-         "If it violates common sense and also is unsafe, choose this option.",
-         "May or may not be safe depending on the particulars of the environment and objects.  If it violates common sense but is potentially safe, choose this option."],
-        key=f"safe_{task_id}"
+        core.SAFETY_OPTIONS, index=None, key=f"safe_{task_id}"
     )
 
     comments_val = st.text_area(
@@ -448,18 +442,42 @@ def render_evaluation_widgets(task_id, ambiguity_options=None):
     }
 
 
+def prefill_widgets(task_id, answers):
+    """Show saved answers when an annotator goes back to an item (only valid option values)."""
+    if f"clarity_{task_id}" in st.session_state or not answers:
+        return
+    for key, value, options in ((f"clarity_{task_id}", answers.get("clarity"), core.CLARITY_OPTIONS),
+                                (f"feas_{task_id}", answers.get("feasibility"), core.FEASIBILITY_OPTIONS),
+                                (f"safe_{task_id}", answers.get("safety"), core.SAFETY_OPTIONS)):
+        if value in options:
+            st.session_state[key] = value
+    st.session_state[f"ambig_type_{task_id}"] = list(answers.get("ambiguity_types") or [])
+    st.session_state[f"comment_{task_id}"] = answers.get("comments") or ""
+
+
+def answers_from_row(row):
+    raw = row[core.COL["Ambiguity_Type"]]
+    try:
+        types = json.loads(raw) if raw not in ("", "N/A") else []
+        types = types if isinstance(types, list) else [raw]
+    except json.JSONDecodeError:
+        types = [x.strip() for x in raw.split(',') if x.strip()]
+    return {"clarity": row[core.COL["Clarity"]], "ambiguity_types": types,
+            "feasibility": row[core.COL["Feasibility"]], "safety": row[core.COL["Safety"]],
+            "comments": row[core.COL["Comments"]]}
+
+
 # --- Training / Calibration Session Module ---
-def render_training_module(gc, annotator_id):
-    """Renders calibration session using exact same UI components as live evaluation."""
+def render_instructions(instructions):
+    for line in instructions:
+        st.markdown(f"📌 {line}")
+
+
+def render_training_module(sh, annotator_id, training_version, train_tasks, instructions=()):
+    """Calibration session with the same display and questions as the live evaluation."""
     st.info(
         "🎓 **Annotator Calibration Session**: Complete these benchmark tasks to align with evaluation standards before proceeding to live tasks.")
-
-    try:
-        with open(TRAINING_FILE, "r") as f:
-            train_tasks = json.load(f)
-    except FileNotFoundError:
-        st.warning("No 'training_tasks.json' found. Proceeding directly to live evaluation.")
-        return True
+    render_instructions(instructions)
 
     if 'train_idx' not in st.session_state:
         st.session_state.train_idx = 0
@@ -470,13 +488,17 @@ def render_training_module(gc, annotator_id):
 
     if t_idx >= len(train_tasks):
         st.success("🎉 **Calibration Complete!** You have unlocked the live dataset evaluation queue.")
-        if st.button("Proceed to Live Evaluations 🚀", type="primary"):
-            save_result(gc, "[TRAINING_COMPLETE]", {"id": "PASSED"}, "N/A", "N/A", "N/A", "N/A",
-                        "Completed calibration", annotator_id)
+        if st.button("Proceed to Live Evaluations 🚀", type="primary", key="proceed_live"):
+            row = [annotator_id, core.TRAINING_MARKER, "PASSED", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A",
+                   "N/A", "Completed calibration", core.INTERFACE_VERSION, training_version]
+            try:
+                write_row(sh, row)
+            except core.SheetError:
+                st.error(SHEET_ERROR)
+                return
             st.session_state.is_trained = True
-            st.session_state.scroll_to_top = True
             st.rerun()
-        return False
+        return
 
     task = train_tasks[t_idx]
     st.write(f"### Calibration Task {t_idx + 1} of {len(train_tasks)} ({task.get('dataset', 'Benchmark')})")
@@ -493,28 +515,24 @@ def render_training_module(gc, annotator_id):
 
     # 3. Check answer & feedback
     if not st.session_state.show_feedback:
-        if st.button("Check Answer", type="primary", key=f"check_btn_{task.get('id', t_idx)}"):
-            if eval_inputs["clarity"] == "Ambiguous" and not eval_inputs["ambiguity_type_str"]:
-                st.error("⚠️ Please select at least one ambiguity type before checking your answer.")
-            else:
-                st.session_state.show_feedback = True
-                st.rerun()
+        complete = core.answers_complete(eval_inputs)
+        if not complete:
+            st.caption("Answer every question to check your answer.")
+        if st.button("Check Answer", type="primary", key=f"check_btn_{task.get('id', t_idx)}",
+                     disabled=not complete):
+            st.session_state.show_feedback = True
+            st.rerun()
     else:
-        # Benchmark validation check
-        c_match = eval_inputs["clarity"] == task.get('expected_clarity')
-        f_match = eval_inputs["feasibility"] == task.get('expected_feasibility')
-        s_match = eval_inputs["safety"] == task.get('expected_safety')
-
-        ambig_match = True
-        if task.get('expected_ambiguity_types'):
-            expected_set = set(task['expected_ambiguity_types'])
-            user_set = set(eval_inputs['ambiguity_types'])
-            ambig_match = expected_set.issubset(user_set) or expected_set == user_set
-
-        if c_match and f_match and s_match and ambig_match:
+        fb = core.training_feedback(task, eval_inputs)
+        if fb["all"]:
             st.success("✅ **Excellent! Your response matches the expert benchmark.**")
         else:
-            st.warning("⚠️ **Your evaluation differed from the benchmark standard.**")
+            differ = [name for name, label in (("clarity", "Clarity"), ("ambiguity_types", "Ambiguity types"),
+                                               ("feasibility", "Feasibility"), ("safety", "Safety"))
+                      if not fb[name]]
+            st.warning("⚠️ **Your evaluation differed from the benchmark standard** on: "
+                       + ", ".join({"clarity": "Clarity", "ambiguity_types": "Ambiguity types",
+                                    "feasibility": "Feasibility", "safety": "Safety"}[d] for d in differ) + ".")
 
         with st.expander("💡 View Benchmark Ground Truth & Expert Explanation", expanded=True):
             st.markdown(f"**Expected Clarity:** {task.get('expected_clarity')}")
@@ -527,188 +545,216 @@ def render_training_module(gc, annotator_id):
         if st.button("Next Training Task ➡️", type="primary", key=f"next_train_btn_{task.get('id', t_idx)}"):
             st.session_state.train_idx += 1
             st.session_state.show_feedback = False
-            st.session_state.scroll_to_top = True
             st.rerun()
 
-    return False
+
+# --- Sign-in ---
+REGISTER, RETURNING = core.REGISTER, core.RETURNING
+
+
+def registration_worksheet(sh):
+    try:
+        return sh.worksheet(core.REG_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=core.REG_SHEET, rows=1000, cols=len(core.REG_HEADER))
+        ws.append_row(core.REG_HEADER, value_input_option="RAW")
+        return ws
+
+
+def authenticate(sh, annotator_id, pin, pin_again, mode):
+    """Register a new ID or check a returning user's PIN. Returns an error message or None."""
+    try:
+        ws = registration_worksheet(sh)
+        reg = core.find_registration(read_values(ws), annotator_id)
+        if mode == REGISTER:
+            if reg is not None:
+                return core.TAKEN
+            error = core.validate_pin(pin)
+            if error:
+                return error
+            if str(pin).strip() != str(pin_again or "").strip():
+                return "The two PINs differ."
+            row = core.registration_row(annotator_id, pin)
+            ws.append_row(row, value_input_option="RAW")
+            # Two registrations of one ID at the same moment: the first row wins.
+            first = core.find_registration(read_values(ws), annotator_id)
+            return None if first is not None and first[1] == row[1] else core.TAKEN
+        if reg is None or not core.verify_pin(pin, reg[1]):
+            return core.NOT_RECOGNISED
+        return None
+    except core.SheetError:
+        raise
+    except Exception as e:
+        log.exception("the registrations worksheet failed")
+        raise core.SheetError("registration failed") from e
+
+
+def sign_in(typed_id, pin, pin_again, study_code, mode, subset, training_version):
+    """Check the study code, register or check the PIN, read the sheet, restore progress.
+
+    Returns an error message or None. Nothing is read from the sheet before the study code
+    and the ID format are checked."""
+    error = core.check_study_code(secret("STUDY_CODE"), study_code)
+    if error:
+        return error
+    annotator_id, error = core.validate_id(typed_id)
+    if error:
+        return error
+    if mode == RETURNING and not str(pin or "").strip():
+        return core.NOT_RECOGNISED
+    sh = open_spreadsheet()
+    error = authenticate(sh, annotator_id, pin, pin_again, mode)
+    if error:
+        return error
+    ws = sh.sheet1
+    values = read_values(ws)
+    ensure_header(ws, values)
+    labeled = core.labeled_items(values, annotator_id)
+    st.session_state.annotator_id = annotator_id
+    st.session_state.is_trained = core.training_done(values, annotator_id, training_version)
+    st.session_state.answers = {tid: answers_from_row(row) for (_, tid), row in labeled.items()}
+    st.session_state.order = core.annotator_order(subset, annotator_id)
+    st.session_state.pos = None
+    st.session_state.logged_blocks = set()
+    st.session_state.train_idx = 0
+    st.session_state.show_feedback = False
+    return None
+
+
+def first_open(flat, answers):
+    return next((i for i, (_, tid) in enumerate(flat) if tid not in answers), None)
 
 
 # --- Main Application Session ---
 def main():
     st.title("🤖 Robotics Dataset Evaluation Interface")
-
-    # Initialize Session State
-    if 'sampled_data' not in st.session_state:
-        st.session_state.sampled_data = {}
-    if 'current_idx' not in st.session_state:
-        st.session_state.current_idx = {'SaGC': 0, 'AmbiK': 0, 'SafeAgentBench': 0}
-    if 'annotator_id' not in st.session_state:
-        st.session_state.annotator_id = None
-    if 'is_trained' not in st.session_state:
-        st.session_state.is_trained = False
+    try:
+        subset, items = load_subset_items()
+        training_version, train_tasks = core.load_training(TRAINING_FILE)
+        instructions = core.load_instructions(TRAINING_FILE)
+    except Exception:
+        log.exception("loading the task files failed")
+        st.error("The task files could not be loaded. Please contact the study team.")
+        st.stop()
 
     # --- Sidebar Setup ---
     st.sidebar.header("Annotator Control Panel")
-    annotator_id = st.sidebar.text_input("Enter your Annotator ID:", value=st.session_state.annotator_id or "").strip()
-    sample_size = st.sidebar.number_input("Tasks per dataset:", min_value=1, max_value=50, value=10)
+    if not st.session_state.get('annotator_id'):
+        mode = st.sidebar.radio("Sign-in", [RETURNING, REGISTER], key="login_mode")
+        typed_code = st.sidebar.text_input("Study code:", type="password", key="login_study_code")
+        typed_id = st.sidebar.text_input("Your ID:", key="login_id", max_chars=40,
+                                         help=core.ID_RULE)
+        typed_pin = st.sidebar.text_input("PIN:", type="password", key="login_pin",
+                                          help=core.PIN_RULE if mode == REGISTER else None)
+        typed_pin2 = (st.sidebar.text_input("Repeat the PIN:", type="password", key="login_pin2")
+                      if mode == REGISTER else None)
+        if mode == REGISTER:
+            st.sidebar.caption("Remember your ID and PIN: you need both to continue later.")
+        label = "Register and start" if mode == REGISTER else "Start / Resume Evaluation"
+        if st.sidebar.button(label, disabled=not typed_id.strip(), key="login_btn"):
+            try:
+                message = sign_in(typed_id, typed_pin, typed_pin2, typed_code, mode, subset, training_version)
+            except core.SheetError:
+                st.error(SHEET_ERROR)
+                st.stop()
+            if message:
+                st.sidebar.error(message)
+            else:
+                st.rerun()
+        st.info("👈 Enter the study code, then sign in with your ID and PIN (first visit: register) in the sidebar.")
+        return
 
-    if st.sidebar.button("Start / Resume Evaluation", disabled=not annotator_id):
-        gc = init_connection()
-        existing_df = get_existing_evaluations(gc)
-        st.session_state.existing_df = existing_df
-
-        st.session_state.annotator_id = annotator_id
-        st.session_state.is_trained = check_user_trained(existing_df, annotator_id)
-
-        raw_sagc = load_raw_data(SAGC_SUBSET, 'json', 'SaGC')
-        raw_ambik = load_raw_data(AMBIK_SUBSET, 'csv', 'AmbiK')
-        raw_safe = load_raw_data(SAFE_SUBSET, 'jsonl', 'SafeAgentBench')
-
-        st.session_state.sampled_data['SaGC'] = allocate_tasks(raw_sagc, existing_df, "SaGC", annotator_id, sample_size)
-        st.session_state.sampled_data['AmbiK'] = allocate_tasks(raw_ambik, existing_df, "AmbiK", annotator_id,
-                                                                sample_size)
-        st.session_state.sampled_data['SafeAgentBench'] = allocate_tasks(raw_safe, existing_df, "SafeAgentBench",
-                                                                         annotator_id, sample_size)
-
-        st.session_state.current_idx = {'SaGC': 0, 'AmbiK': 0, 'SafeAgentBench': 0}
-
-        is_returning = not existing_df[
-            existing_df['Annotator_ID'].astype(str) == str(annotator_id)].empty if not existing_df.empty else False
-        greeting = "Welcome back" if is_returning else "Welcome"
-        total_allocated = sum(len(v) for v in st.session_state.sampled_data.values())
-
-        st.sidebar.success(f"{greeting}, {annotator_id}! Allocated {total_allocated} total tasks across datasets.")
-        st.session_state.scroll_to_top = True
+    annotator_id = st.session_state.annotator_id
+    st.sidebar.success(f"Signed in as **{annotator_id}**")
+    if st.sidebar.button("Sign out", key="logout_btn"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
         st.rerun()
 
+    try:
+        sh = open_spreadsheet()
+    except core.SheetError:
+        st.error(SHEET_ERROR)
+        st.stop()
+
     # Routing: Calibration vs. Live Evaluation Queue
-    if st.session_state.annotator_id:
-        gc = init_connection()
+    if not st.session_state.is_trained:
+        render_training_module(sh, annotator_id, training_version, train_tasks, instructions)
+        return
 
-        if not st.session_state.is_trained:
-            # Render Training Session
-            completed_training = render_training_module(gc, st.session_state.annotator_id)
-            if not completed_training:
-                return
+    order = st.session_state.order
+    flat = [(b, tid) for b, ids in order for tid in ids]
+    answers = st.session_state.answers
+    if st.session_state.pos is None:
+        st.session_state.pos = first_open(flat, answers)
+    pos = st.session_state.pos
+    n_done = sum(1 for _, tid in flat if tid in answers)
+    st.sidebar.progress(n_done / len(flat), text=f"{n_done} of {len(flat)} items done")
 
-        # Render Live Evaluation Queue
-        st.sidebar.divider()
-        dataset_choice = st.sidebar.radio("Select Dataset to Evaluate:", ["SaGC", "AmbiK", "SafeAgentBench"])
-        dataset_data = st.session_state.sampled_data.get(dataset_choice, [])
+    if pos is None:
+        st.success("🎉 You have completed every item. Thank you!")
+        return
 
-        if not dataset_data:
-            st.info(
-                f"No remaining tasks allocated for dataset '{dataset_choice}'. All tasks completed or max limit reached!")
+    block, task_id = flat[pos]
+    block_ids = dict(order)[block]
+    if block not in st.session_state.logged_blocks:
+        try:
+            log_block_order(sh, annotator_id, subset, block, block_ids)
+        except core.SheetError:
+            st.error(SHEET_ERROR)
+            st.stop()
+        st.session_state.logged_blocks.add(block)
+
+    meta = next(it for it in subset["items"] if it["id"] == task_id)
+    dataset_choice = meta["dataset"]
+    current_task = items[task_id]
+    st.markdown(f"### Block {block} of {len(order)} · item {block_ids.index(task_id) + 1} of {len(block_ids)} "
+                f"({dataset_choice})")
+    st.caption("You can stop at any time; your answers are saved and you continue where you left off.")
+    render_instructions(instructions)
+
+    # Navigation Bar
+    nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+    with nav_col1:
+        if st.button("⬅️ Previous Task", disabled=(pos == 0), key=f"prev_{task_id}"):
+            st.session_state.pos -= 1
+            st.rerun()
+    with nav_col3:
+        if st.button("Next Task ➡️", disabled=(task_id not in answers or pos >= len(flat) - 1),
+                     key=f"next_{task_id}"):
+            st.session_state.pos += 1
+            st.rerun()
+
+    # 1. Render Task Display
+    render_task_display(current_task, dataset_choice)
+    st.divider()
+
+    # 2. Render Evaluation Widgets (saved answers shown when going back)
+    prefill_widgets(task_id, answers.get(task_id))
+    st.subheader("Evaluate This Task")
+    eval_inputs = render_evaluation_widgets(task_id)
+
+    # 3. Submit Action
+    complete = core.answers_complete(eval_inputs)
+    if not complete:
+        st.caption("Answer every question to enable Submit (comments are optional).")
+    if st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary", disabled=not complete):
+        row = build_row(
+            dataset_choice, current_task,
+            eval_inputs["clarity"], eval_inputs["ambiguity_type_str"],
+            eval_inputs["feasibility"], eval_inputs["safety"],
+            eval_inputs["comments"], annotator_id, training_version
+        )
+        try:
+            write_row(sh, row)
+        except core.SheetError:
+            st.error(SHEET_ERROR)
             return
-
-        current_idx = st.session_state.current_idx[dataset_choice]
-        if current_idx >= len(dataset_data):
-            st.success(f"🎉 You have completed all allocated tasks for '{dataset_choice}'!")
-            return
-
-        current_task = dataset_data[current_idx]
-        task_id = current_task.get('id', 'N/A')
-
-        st.markdown(f"### Evaluating **{dataset_choice}** (Task {current_idx + 1} of {len(dataset_data)})")
-
-        # Navigation Bar
-        nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
-        with nav_col1:
-            if st.button("⬅️ Previous Task", disabled=(current_idx == 0), key=f"prev_{dataset_choice}_{task_id}"):
-                st.session_state.current_idx[dataset_choice] -= 1
-                st.session_state.scroll_to_top = True
-                st.rerun()
-        with nav_col3:
-            if st.button("Next Task ➡️", disabled=(current_idx >= len(dataset_data) - 1),
-                         key=f"next_{dataset_choice}_{task_id}"):
-                st.session_state.current_idx[dataset_choice] += 1
-                st.session_state.scroll_to_top = True
-                st.rerun()
-
-        # 1. Render Task Display
-        render_task_display(current_task, dataset_choice)
-        st.divider()
-
-        # --- Pre-populate widget session state from saved data if returning to this task ---
-        clarity_key = f"clarity_{task_id}"
-        ambig_key = f"ambig_type_{task_id}"
-        feas_key = f"feas_{task_id}"
-        safe_key = f"safe_{task_id}"
-        comment_key = f"comment_{task_id}"
-
-        if clarity_key not in st.session_state and 'existing_df' in st.session_state:
-            df = st.session_state.existing_df
-            if not df.empty:
-                match = df[
-                    (df['Annotator_ID'].astype(str) == str(st.session_state.annotator_id)) &
-                    (df['Dataset'].astype(str) == str(dataset_choice)) &
-                    (df['Task_ID'].astype(str) == str(task_id))
-                    ]
-                if not match.empty:
-                    row = match.iloc[0]
-                    st.session_state[clarity_key] = str(row.get('Clarity', 'Clear & Actionable'))
-
-                    ambig_str = str(row.get('Ambiguity_Type', 'N/A'))
-                    if ambig_str and ambig_str != 'N/A' and ambig_str != '':
-                        try:
-                            saved_ambig_list = json.loads(ambig_str)
-                            if not isinstance(saved_ambig_list, list):
-                                saved_ambig_list = [ambig_str]
-                        except json.JSONDecodeError:
-                            saved_ambig_list = [x.strip() for x in ambig_str.split(',') if x.strip()]
-
-                        st.session_state[ambig_key] = saved_ambig_list
-                    else:
-                        st.session_state[ambig_key] = []
-
-                    st.session_state[feas_key] = str(row.get('Feasibility', 'Feasible'))
-                    st.session_state[safe_key] = str(row.get('Safety', 'Safe'))
-                    st.session_state[comment_key] = str(row.get('Comments', ''))
-
-        # 2. Render Evaluation Widgets
-        st.subheader("Evaluate This Task")
-        eval_inputs = render_evaluation_widgets(task_id)
-
-        # 3. Submit Action
-        submit_btn = st.button("Submit Evaluation & Next", key=f"submit_{task_id}", type="primary")
-
-        if submit_btn:
-            if ("Ambiguous" in eval_inputs["clarity"] or "Mostly clear" in eval_inputs["clarity"]) and not eval_inputs[
-                "ambiguity_type_str"]:
-                st.error("⚠️ Please select at least one ambiguity type before submitting.")
-            else:
-                success = save_result(
-                    gc, dataset_choice, current_task,
-                    eval_inputs["clarity"], eval_inputs["ambiguity_type_str"],
-                    eval_inputs["feasibility"], eval_inputs["safety"],
-                    eval_inputs["comments"], st.session_state.annotator_id
-                )
-
-                if success:
-                    new_row = {
-                        'Annotator_ID': str(st.session_state.annotator_id),
-                        'Dataset': str(dataset_choice),
-                        'Task_ID': str(task_id),
-                        'Clarity': str(eval_inputs["clarity"]),
-                        'Ambiguity_Type': str(eval_inputs["ambiguity_type_str"]),
-                        'Feasibility': str(eval_inputs["feasibility"]),
-                        'Safety': str(eval_inputs["safety"]),
-                        'Comments': str(eval_inputs["comments"])
-                    }
-                    if 'existing_df' in st.session_state and not st.session_state.existing_df.empty:
-                        df = st.session_state.existing_df
-                        # Drop old entry if exists, then append new
-                        df = df[~((df['Annotator_ID'].astype(str) == str(st.session_state.annotator_id)) &
-                                  (df['Dataset'].astype(str) == str(dataset_choice)) &
-                                  (df['Task_ID'].astype(str) == str(task_id)))]
-                        st.session_state.existing_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-
-                    st.session_state.current_idx[dataset_choice] += 1
-                    st.session_state.scroll_to_top = True
-                    st.rerun()
-
-    else:
-        st.info("👈 Enter your Annotator ID in the sidebar to begin.")
+        answers[task_id] = {k: eval_inputs[k] for k in
+                            ("clarity", "ambiguity_types", "feasibility", "safety", "comments")}
+        st.toast("Response saved to database!", icon="✅")
+        st.session_state.pos = first_open(flat, answers)
+        st.rerun()
 
 
 if __name__ == "__main__":
