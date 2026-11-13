@@ -549,11 +549,63 @@ def render_training_module(sh, annotator_id, training_version, train_tasks, inst
 
 
 # --- Sign-in ---
-def sign_in(annotator_id, code, subset, training_version):
-    """Check the access code, read the sheet, restore progress. Returns an error message or None."""
-    if not core.check_access(secret("annotators"), annotator_id, code):
-        return "Unknown annotator ID or wrong access code."
+REGISTER, RETURNING = core.REGISTER, core.RETURNING
+
+
+def registration_worksheet(sh):
+    try:
+        return sh.worksheet(core.REG_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=core.REG_SHEET, rows=1000, cols=len(core.REG_HEADER))
+        ws.append_row(core.REG_HEADER, value_input_option="RAW")
+        return ws
+
+
+def authenticate(sh, annotator_id, pin, pin_again, mode):
+    """Register a new ID or check a returning user's PIN. Returns an error message or None."""
+    try:
+        ws = registration_worksheet(sh)
+        reg = core.find_registration(read_values(ws), annotator_id)
+        if mode == REGISTER:
+            if reg is not None:
+                return core.TAKEN
+            error = core.validate_pin(pin)
+            if error:
+                return error
+            if str(pin).strip() != str(pin_again or "").strip():
+                return "The two PINs differ."
+            row = core.registration_row(annotator_id, pin)
+            ws.append_row(row, value_input_option="RAW")
+            # Two registrations of one ID at the same moment: the first row wins.
+            first = core.find_registration(read_values(ws), annotator_id)
+            return None if first is not None and first[1] == row[1] else core.TAKEN
+        if reg is None or not core.verify_pin(pin, reg[1]):
+            return core.NOT_RECOGNISED
+        return None
+    except core.SheetError:
+        raise
+    except Exception as e:
+        log.exception("the registrations worksheet failed")
+        raise core.SheetError("registration failed") from e
+
+
+def sign_in(typed_id, pin, pin_again, study_code, mode, subset, training_version):
+    """Check the study code, register or check the PIN, read the sheet, restore progress.
+
+    Returns an error message or None. Nothing is read from the sheet before the study code
+    and the ID format are checked."""
+    error = core.check_study_code(secret("STUDY_CODE"), study_code)
+    if error:
+        return error
+    annotator_id, error = core.validate_id(typed_id)
+    if error:
+        return error
+    if mode == RETURNING and not str(pin or "").strip():
+        return core.NOT_RECOGNISED
     sh = open_spreadsheet()
+    error = authenticate(sh, annotator_id, pin, pin_again, mode)
+    if error:
+        return error
     ws = sh.sheet1
     values = read_values(ws)
     ensure_header(ws, values)
@@ -588,11 +640,20 @@ def main():
     # --- Sidebar Setup ---
     st.sidebar.header("Annotator Control Panel")
     if not st.session_state.get('annotator_id'):
-        typed_id = st.sidebar.text_input("Enter your Annotator ID:", key="login_id")
-        typed_code = st.sidebar.text_input("Access code:", type="password", key="login_code")
-        if st.sidebar.button("Start / Resume Evaluation", disabled=not typed_id.strip(), key="login_btn"):
+        mode = st.sidebar.radio("Sign-in", [RETURNING, REGISTER], key="login_mode")
+        typed_code = st.sidebar.text_input("Study code:", type="password", key="login_study_code")
+        typed_id = st.sidebar.text_input("Your ID:", key="login_id", max_chars=40,
+                                         help=core.ID_RULE)
+        typed_pin = st.sidebar.text_input("PIN:", type="password", key="login_pin",
+                                          help=core.PIN_RULE if mode == REGISTER else None)
+        typed_pin2 = (st.sidebar.text_input("Repeat the PIN:", type="password", key="login_pin2")
+                      if mode == REGISTER else None)
+        if mode == REGISTER:
+            st.sidebar.caption("Remember your ID and PIN: you need both to continue later.")
+        label = "Register and start" if mode == REGISTER else "Start / Resume Evaluation"
+        if st.sidebar.button(label, disabled=not typed_id.strip(), key="login_btn"):
             try:
-                message = sign_in(core.normalize_id(typed_id), typed_code, subset, training_version)
+                message = sign_in(typed_id, typed_pin, typed_pin2, typed_code, mode, subset, training_version)
             except core.SheetError:
                 st.error(SHEET_ERROR)
                 st.stop()
@@ -600,7 +661,7 @@ def main():
                 st.sidebar.error(message)
             else:
                 st.rerun()
-        st.info("👈 Enter your Annotator ID and access code in the sidebar to begin.")
+        st.info("👈 Enter the study code, then sign in with your ID and PIN (first visit: register) in the sidebar.")
         return
 
     annotator_id = st.session_state.annotator_id

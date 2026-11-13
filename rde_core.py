@@ -7,11 +7,15 @@ Sheet layout (sheet1), one row per (annotator, dataset, task, interface version)
 
 Worksheet "allocations": one row per (annotator, interface version, subset version, block),
 with the item order shown to that annotator.
+Worksheet "registrations": one row per self-registered annotator ID with a salted PBKDF2 hash
+of the PIN (never the PIN) and the registration time.
 """
 import hashlib
 import hmac
 import json
+import os
 import random
+import re
 from datetime import datetime, timezone
 
 INTERFACE_VERSION = "v2"
@@ -68,16 +72,71 @@ def normalize_id(raw):
     return str(raw or "").strip().lower()
 
 
-def check_access(allowlist, annotator_id, code):
-    """True if the normalized ID is in the allowlist and the access code matches."""
-    if not allowlist:
+REGISTER, RETURNING = "First time here: register", "I have registered: sign in"
+ID_RE = re.compile(r"[a-z0-9 _-]{1,40}")
+MIN_PIN = 4
+MAX_PIN = 128
+PBKDF2_ITERATIONS = 200_000
+REG_SHEET = "registrations"
+REG_HEADER = ["Annotator_ID", "PIN_Hash", "Registered_UTC", "Interface_Version"]
+ID_RULE = "IDs may contain only letters, digits, spaces, - and _ (at most 40 characters)."
+PIN_RULE = f"The PIN must have at least {MIN_PIN} characters."
+TAKEN = "This ID is already registered; choose another or enter your PIN."
+NOT_RECOGNISED = "ID or PIN not recognised."
+NO_STUDY_CODE = "Sign-in is closed: no study code is configured. Please contact the study team."
+WRONG_STUDY_CODE = "The study code is not correct."
+
+
+def check_study_code(configured, entered):
+    """None if the entered study code matches the configured one, else an error message.
+
+    With no study code configured nobody can sign in."""
+    if not configured or not str(configured).strip():
+        return NO_STUDY_CODE
+    ok = hmac.compare_digest(str(configured).strip().encode(), str(entered or "").strip().encode())
+    return None if ok else WRONG_STUDY_CODE
+
+
+def validate_id(raw):
+    """(normalized id, error message or None)."""
+    annotator_id = normalize_id(raw)
+    return annotator_id, (None if ID_RE.fullmatch(annotator_id) else ID_RULE)
+
+
+def validate_pin(pin):
+    pin = str(pin or "").strip()
+    return None if MIN_PIN <= len(pin) <= MAX_PIN else PIN_RULE
+
+
+def hash_pin(pin, salt=None, iterations=PBKDF2_ITERATIONS):
+    """'pbkdf2_sha256$<iterations>$<salt hex>$<hash hex>'; the PIN itself is never stored."""
+    salt = os.urandom(16) if salt is None else salt
+    digest = hashlib.pbkdf2_hmac("sha256", str(pin).strip().encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def verify_pin(pin, stored):
+    try:
+        scheme, iterations, salt, _ = str(stored).split("$")
+        if scheme != "pbkdf2_sha256":
+            return False
+        expected = hash_pin(pin, bytes.fromhex(salt), int(iterations))
+    except (ValueError, TypeError):
         return False
-    table = {normalize_id(k): str(v) for k, v in dict(allowlist).items()}
-    expected = table.get(normalize_id(annotator_id))
-    if expected is None:
-        hmac.compare_digest("x", str(code or ""))  # same work for unknown IDs
-        return False
-    return hmac.compare_digest(expected.encode(), str(code or "").strip().encode())
+    return hmac.compare_digest(expected.encode(), str(stored).encode())
+
+
+def find_registration(values, annotator_id):
+    """The first registration row of this ID (first registration wins), or None."""
+    for row in values[1:]:
+        if row and row[0] == annotator_id:
+            return row
+    return None
+
+
+def registration_row(annotator_id, pin):
+    return [annotator_id, hash_pin(pin), datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            INTERFACE_VERSION]
 
 
 def needs_types(clarity):
