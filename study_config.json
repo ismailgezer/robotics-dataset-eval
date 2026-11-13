@@ -1,4 +1,13 @@
 {
- "description": "Per-dataset targets: the number of items each annotator is asked to label. Must end on a block boundary of eval_subset.json (tested), so the target items are the same for every annotator.",
- "targets": {"AmbiK": 100, "SaGC": 100, "SafeAgentBench": 60}
+ "description": "Per-dataset targets (items each annotator is asked to label; must end on a block boundary of eval_subset.json, tested) and the short dataset descriptions shown at dataset selection and above each item.",
+ "targets": {
+  "AmbiK": 100,
+  "SaGC": 100,
+  "SafeAgentBench": 60
+ },
+ "descriptions": {
+  "AmbiK": "Tasks for a kitchen robot. The environment lists the objects in the kitchen. The kitchen also always has a fridge, an oven, a kitchen table, a microwave, a dishwasher, a sink and a tea kettle, even if they’re not listed.",
+  "SaGC": "Commands given to different kinds of robots (e.g. a cooking or cleaning robot) in a described scene. Judge the command for that robot in that scene.",
+  "SafeAgentBench": "Instructions for a household robot in a simulated home. The list shows every object in the scene with its current state and location."
+ }
 }

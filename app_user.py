@@ -252,15 +252,22 @@ def load_thor_workspaces():
         return json.load(f)
 
 
-def render_task_display(task, dataset_choice):
-    """Shows the task exactly as the models get it: the workspace text and the instruction, verbatim.
+def render_task_display(task, dataset_choice, description=None):
+    """Shows the dataset description (small), the task context and the instruction.
 
+    AmbiK: environment_short; SaGC: the models' workspace text with the robot type; SafeAgentBench:
+    the compact object list (states, containers, properties) and the raw description in an expander.
     Nothing the models do not see is shown (no labels, ambiguity types, plans or derived checks)."""
+    if description:
+        st.caption(description)
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("Environment & Workspace")
         st.code(core.context_text(task, dataset_choice, load_thor_workspaces()), language=None, wrap_lines=True)
+        if dataset_choice == "SafeAgentBench":
+            with st.expander("Full scene description", expanded=False):
+                st.code(load_thor_workspaces()[task["scene_name"]], language=None)
 
     with col2:
         st.subheader("Command / Instruction")
@@ -347,7 +354,7 @@ def answers_from_row(row):
 
 
 # --- Training / Calibration Session Module ---
-def render_training_module(sh, annotator_id, training_version, train_tasks):
+def render_training_module(sh, annotator_id, training_version, train_tasks, descriptions=None):
     """Calibration session with the same display and questions as the live evaluation."""
     st.info(
         "🎓 **Annotator Calibration Session**: Complete these benchmark tasks to align with evaluation standards before proceeding to live tasks.")
@@ -377,7 +384,8 @@ def render_training_module(sh, annotator_id, training_version, train_tasks):
     st.write(f"### Calibration Task {t_idx + 1} of {len(train_tasks)} ({task.get('dataset', 'Benchmark')})")
 
     # 1. Reuse task display
-    render_task_display(task, dataset_choice=task.get('dataset', 'AmbiK'))
+    dataset = task.get('dataset', 'AmbiK')
+    render_task_display(task, dataset, (descriptions or {}).get(dataset))
     st.divider()
 
     # 2. Reuse evaluation form
@@ -458,6 +466,7 @@ def main():
         subset, items = load_subset_items()
         training_version, train_tasks = core.load_training(TRAINING_FILE)
         targets = core.load_targets(STUDY_CONFIG)
+        descriptions = core.load_descriptions(STUDY_CONFIG)
     except Exception:
         log.exception("loading the task files failed")
         st.error("The task files could not be loaded. Please contact the study team.")
@@ -498,7 +507,7 @@ def main():
 
     # Routing: Calibration vs. Live Evaluation Queue
     if not st.session_state.is_trained:
-        render_training_module(sh, annotator_id, training_version, train_tasks)
+        render_training_module(sh, annotator_id, training_version, train_tasks, descriptions)
         return
 
     order = st.session_state.order
@@ -541,6 +550,9 @@ def main():
         st.session_state.logged_blocks.add((dataset_choice, block))
 
     current_task = items[task_id]
+    described = st.session_state.setdefault("described", set())
+    if dataset_choice not in described:  # shown when a dataset is selected, until its first answer
+        st.info(f"**{dataset_choice}:** {descriptions[dataset_choice]}")
     heading = f"### Evaluating **{dataset_choice}** · {done} of {target}"
     if extras[dataset_choice]:
         heading += f" · optional extra items: {extra}"
@@ -561,7 +573,7 @@ def main():
             st.rerun()
 
     # 1. Render Task Display
-    render_task_display(current_task, dataset_choice)
+    render_task_display(current_task, dataset_choice, descriptions[dataset_choice])
     st.divider()
 
     # 2. Render Evaluation Widgets (saved answers shown when going back)
@@ -591,6 +603,7 @@ def main():
                             ("clarity", "ambiguity_types", "feasibility", "safety", "comments")}
         st.toast("Response saved to database!", icon="✅")
         st.session_state.welcome = None
+        described.add(dataset_choice)
         pos_map[dataset_choice] = core.next_open(flat, answers, target, extras[dataset_choice])
         st.rerun()
 

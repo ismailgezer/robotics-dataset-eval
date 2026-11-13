@@ -226,8 +226,11 @@ def page_text(at):
     return "\n".join(parts + [e.value for e in at.sidebar.markdown])
 
 
+DESCRIPTIONS = core.load_descriptions(ROOT / "study_config.json")
+
+
 class TestContext(AppCase):
-    """Annotators see the models' context verbatim, and nothing the models do not see."""
+    """What annotators see per dataset, the dataset descriptions, and nothing the models do not see."""
 
     def records(self):
         import csv as _csv
@@ -239,7 +242,7 @@ class TestContext(AppCase):
         thor = json.loads((ROOT / "thor_workspaces.json").read_text(encoding="utf-8"))
         return ambik, sagc, sab, thor
 
-    def test_each_dataset_shows_the_models_context(self):
+    def test_each_dataset(self):
         ambik, sagc, sab, thor = self.records()
         at = do_training(self, login(new_app(), "alice"))
         self.assertNotIn("standard kitchen", page_text(at).lower())
@@ -253,32 +256,44 @@ class TestContext(AppCase):
                 r = dict(ambik[int(row)], instruction=ambik[int(row)]["ambiguous_task" if form == "ambiguous" else "unambiguous_direct"])
             else:
                 r = sab[int(tid.split("_")[1])]
-            expected = core.context_text(r, ds, thor)
-            self.assertEqual([c.value for c in at.code], [expected], ds)          # verbatim, once
+            shown = core.context_text(r, ds, thor)
+            codes = [c.value for c in at.code]
+            if ds == "SafeAgentBench":
+                self.assertEqual(codes, [shown, thor[r["scene_name"]]])     # compact list + raw (in the expander)
+                self.assertEqual([e.label for e in at.expander if e.label == "Full scene description"],
+                                 ["Full scene description"])
+            else:
+                self.assertEqual(codes, [shown], ds)
+            if ds == "AmbiK":
+                self.assertEqual(shown, r["environment_short"])
+            if ds == "SaGC":
+                self.assertTrue(shown.startswith(f"Robot Type: {r['task']}. "))
             self.assertTrue(any(core.instruction_text(r, ds) in m.value for m in at.success), ds)
+            # the description: at dataset selection (until the first answer) and small above each item
+            self.assertIn(f"**{ds}:** {DESCRIPTIONS[ds]}", texts(at.info))
+            self.assertIn(DESCRIPTIONS[ds], texts(at.caption))
             text = page_text(at)
             if ds == "AmbiK":
                 for field in ("plan_for_amb_task", "plan_for_clear_task", "question", "answer", "user_intent"):
-                    if r[field].strip() and r[field].strip() not in expected:
+                    if r[field].strip() and r[field].strip() not in shown:
                         self.assertNotIn(r[field].strip(), text, field)
-                if r["environment_short"] not in r["environment_full"]:
-                    self.assertNotIn(r["environment_short"], text)
                 self.assertNotIn(r["ambiguity_type"], text)
             if ds == "SafeAgentBench":
                 self.assertNotIn("Object Presence Check", text)
-                self.assertNotIn("Scene Name", text)
                 if r.get("risk_category"):
                     self.assertNotIn(str(r["risk_category"]), text)
-            # column F of the answer row records the context that was shown
             submit_current(at)
             row = next(x for x in self.rows("alice") if x[2] == tid)
-            self.assertEqual(row[core.COL["Workspace"]], expected)
+            self.assertEqual(row[core.COL["Workspace"]], shown)              # column F = what was shown
+            self.assertNotIn(f"**{ds}:** {DESCRIPTIONS[ds]}", texts(at.info))  # box gone after the first answer
+            self.assertIn(DESCRIPTIONS[ds], texts(at.caption))                 # small text stays
 
-    def test_training_shows_the_models_context(self):
+    def test_training_shows_the_same_display(self):
         at = login(new_app(), "alice")
         self.assertNotIn("standard kitchen", page_text(at).lower())
         t = TRAINING[0]
-        self.assertEqual([c.value for c in at.code], [core.AMBIK_APPLIANCES + t["environment_full"]])
+        self.assertEqual([c.value for c in at.code], [t["environment_short"]])
+        self.assertIn(DESCRIPTIONS["AmbiK"], texts(at.caption))
 
 
 class TestTrainingFeedback(AppCase):

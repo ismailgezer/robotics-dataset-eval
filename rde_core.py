@@ -119,16 +119,79 @@ def load_training(path):
     return str(data["version"]), data["tasks"]
 
 
-# --- Task context: exactly what the models see ---------------------------------------------------
-# AmbiK: the fixed appliance list + environment_full (multivote-triage datasets.load_ambik, PROTOCOL
-# §3.1; the AmbiK repo baselines name the same appliances). SaGC: robot type, locations, objects,
-# people (multivote-triage datasets.load_sagc). SafeAgentBench: the AI2-THOR workspace description
-# (SafeAgentBench safety_test.py, ThorWorkspace.get_workspace_description; thor_workspaces.json).
+# --- Task context shown to annotators ------------------------------------------------------------
+# AmbiK: environment_short (the models also get the appliance list below, which the AmbiK dataset
+# description names). SaGC: the models' workspace text (robot type, locations, objects, people).
+# SafeAgentBench: a compact object list generated from the AI2-THOR workspace description the models
+# get (every object with its states, container and properties), plus the raw description.
 AMBIK_APPLIANCES = "a fridge, an oven, a kitchen table, a microwave, a dishwasher, a sink, a tea kettle, "
+SAB_STATES = {"open", "closed", "on", "off", "dirty", "filled with liquid", "broken", "moving"}
+SAB_STATE_WORDS = {"on": "switched on", "off": "switched off"}  # so the state is not read as a location
+SAB_PROPERTIES = {"heat source", "pickupable", "openable", "toggleable", "receptacle"}
+# preposition for each container type in thor_workspaces.json (the description says "inside" for all)
+SAB_ON = {"ArmChair", "Bed", "Chair", "CoffeeTable", "CounterTop", "Desk", "DiningTable", "Dresser", "Floor",
+          "HandTowelHolder", "Ottoman", "Plate", "Shelf", "SideTable", "Sofa", "StoveBurner", "TVStand", "Toilet",
+          "ToiletPaperHanger", "TowelHolder"}
+SAB_IN = {"Bathtub", "Bowl", "Cabinet", "CoffeeMachine", "Cup", "Drawer", "Fridge", "GarbageCan", "Microwave",
+          "Pan", "Pot", "Sink"}
+
+
+def sab_objects(description):
+    """[(name, states, containers, properties)] for every line of 'Object states and locations'.
+
+    Raises ValueError on a token or container type it does not know, so nothing is dropped silently."""
+    section = description.split("Object states and locations:\n", 1)[1].split("\n\n", 1)[0]
+    out = []
+    for line in section.splitlines():
+        m = re.fullmatch(r"- (\w+)(?:: (.*))?", line.strip())
+        if not m:
+            raise ValueError(f"unexpected line: {line!r}")
+        states, containers, props = [], [], []
+        for token in [t.strip() for t in (m.group(2) or "").split(";") if t.strip()]:
+            if token.startswith("position ("):
+                continue
+            if token.startswith("inside "):
+                kind = token[len("inside "):].split("|")[0]
+                if kind in SAB_ON:
+                    containers.append(f"on {kind}")
+                elif kind in SAB_IN:
+                    containers.append(f"in {kind}")
+                else:
+                    raise ValueError(f"unknown container type {kind!r}")
+            elif token in SAB_STATES:
+                states.append(SAB_STATE_WORDS.get(token, token))
+            elif token in SAB_PROPERTIES:
+                props.append(token)
+            else:
+                raise ValueError(f"unknown token {token!r} in {line!r}")
+        out.append((m.group(1), states, containers, props))
+    return out
+
+
+def sab_compact(description):
+    """One line per object, e.g. 'Book (closed, on Desk; openable, pickupable)'; identical lines
+    (several instances in the same state and container type) are written once with '×n', in the order
+    of first appearance (the description is alphabetical)."""
+    lines = []
+    for name, states, containers, props in sab_objects(description):
+        inner = ", ".join(states + containers)
+        if props:
+            inner = (inner + "; " if inner else "") + ", ".join(props)
+        lines.append(f"{name} ({inner})" if inner else name)
+    counts = {}
+    for line in lines:                       # identical entries merged, in order of first appearance
+        counts[line] = counts.get(line, 0) + 1
+    out = []
+    for line, n in counts.items():
+        if n == 1:
+            out.append(line)
+        else:
+            out.append(line.replace(" (", f" ×{n} (", 1) if " (" in line else f"{line} ×{n}")
+    return "\n".join(out)
 
 
 def context_text(task, dataset, thor_workspaces=None):
-    """The workspace text the models get for this task, verbatim."""
+    """The task context shown to annotators (and recorded in column F)."""
     if dataset == "SaGC":
         scene = task.get("scene", {})
         return (f"Robot Type: {task.get('task', '')}. "
@@ -136,9 +199,9 @@ def context_text(task, dataset, thor_workspaces=None):
                 f"Detected Objects: {', '.join(scene.get('objects', []))}. "
                 f"Detected People: {', '.join(scene.get('people', []))}.")
     if dataset == "AmbiK":
-        return AMBIK_APPLIANCES + task["environment_full"]
+        return str(task["environment_short"])
     if dataset == "SafeAgentBench":
-        return thor_workspaces[task["scene_name"]]
+        return sab_compact(thor_workspaces[task["scene_name"]])
     raise ValueError(dataset)
 
 
@@ -149,6 +212,13 @@ def instruction_text(task, dataset):
     if dataset == "AmbiK":
         return str(task.get("eval_instruction") or task.get("instruction") or "").strip()
     return str(task.get("instruction", "")).strip()
+
+
+def load_descriptions(path):
+    """{dataset: short description shown at dataset selection and above each item}."""
+    with open(path, encoding="utf-8") as f:
+        descriptions = json.load(f)["descriptions"]
+    return {ds: str(descriptions[ds]) for ds in DATASETS}
 
 
 # --- Sheet rows -------------------------------------------------------------------------------

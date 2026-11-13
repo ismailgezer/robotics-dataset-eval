@@ -200,30 +200,100 @@ def subset_records():
     return {k: v for k, v in out.items() if k in ids}
 
 
+def full_tokens(description):
+    """Multiset of (object, sorted non-position tokens) from 'Object states and locations'."""
+    section = description.split("Object states and locations:\n")[1].split("\n\n")[0]
+    out = Counter()
+    for line in section.splitlines():
+        name, _, rest = line.strip()[2:].partition(": ")
+        tokens = []
+        for t in [x.strip() for x in rest.split(";") if x.strip()]:
+            if t.startswith("position ("):
+                continue
+            tokens.append("inside " + t[7:].split("|")[0] if t.startswith("inside ") else t)
+        out[(name, tuple(sorted(tokens)))] += 1
+    return out
+
+
+def compact_tokens(text):
+    """The same multiset, read back from the compact list."""
+    out = Counter()
+    for line in text.splitlines():
+        m = re.fullmatch(r"(\w+)(?: ×(\d+))?(?: \((.*)\))?", line)
+        name, n, inner = m.group(1), int(m.group(2) or 1), m.group(3) or ""
+        tokens = []
+        for t in [x.strip() for x in re.split(r"[;,]", inner) if x.strip()]:
+            t = {"switched on": "on", "switched off": "off"}.get(t, t)
+            tokens.append("inside " + t[3:] if re.match(r"(on|in) [A-Z]", t) else t)
+        out[(name, tuple(sorted(tokens)))] += n
+    return out
+
+
+def present_objects(description):
+    section = description.split("Objects present in the scene:\n")[1].split("\n\n")[0]
+    out = Counter()
+    for line in section.splitlines():
+        m = re.fullmatch(r"- (\w+)(?: \(instances: (\d+)\))?", line.strip())
+        out[m.group(1)] += int(m.group(2) or 1)
+    return out
+
+
 class TestContext(unittest.TestCase):
-    """The website shows the models' context: same workspace text and instruction, verbatim."""
+    """What the website shows: AmbiK environment_short, SaGC with robot type, SafeAgentBench compact list."""
     records = subset_records()
 
-    def test_ambik_uses_environment_full(self):
+    def test_ambik_shows_environment_short(self):
         for tid, (ds, r) in self.records.items():
             if ds == "AmbiK":
-                ctx = core.context_text(r, ds)
-                self.assertEqual(ctx, core.AMBIK_APPLIANCES + r["environment_full"])
-                if r["environment_short"] not in r["environment_full"]:
-                    self.assertNotIn(r["environment_short"], ctx, tid)
+                self.assertEqual(core.context_text(r, ds), r["environment_short"], tid)
 
     def test_sagc_has_robot_type(self):
         for tid, (ds, r) in self.records.items():
             if ds == "SaGC":
                 self.assertTrue(core.context_text(r, ds).startswith(f"Robot Type: {r['task']}. "), tid)
 
-    def test_safeagentbench_uses_workspace_description(self):
+    def test_safeagentbench_compact_list_keeps_every_state(self):
+        # Every state, container type, property and object of the full description is in the compact
+        # list, for all 120 items; only coordinates, container instances, the header, the visible
+        # objects and the agent state are left out (they stay in the 'Full scene description').
+        n = 0
         for tid, (ds, r) in self.records.items():
-            if ds == "SafeAgentBench":
-                self.assertEqual(core.context_text(r, ds, THOR), THOR[r["scene_name"]])
+            if ds != "SafeAgentBench":
+                continue
+            description = THOR[r["scene_name"]]
+            compact = core.context_text(r, ds, THOR)
+            self.assertEqual(compact_tokens(compact), full_tokens(description), tid)
+            names = Counter()
+            for (name, _), k in compact_tokens(compact).items():
+                names[name] += k
+            self.assertEqual(names, present_objects(description), tid)
+            self.assertNotRegex(compact, r"position|\(-?\d+\.\d+|\|")   # no coordinates or instance IDs
+            n += 1
+        self.assertEqual(n, 120)
+
+    def test_every_scene_parses(self):
+        for scene, description in THOR.items():
+            core.sab_compact(description)        # raises on an unknown token or container type
+
+    def test_unknown_token_is_an_error(self):
+        bad = THOR["FloorPlan1"].replace("; pickupable", "; glowing", 1)
+        with self.assertRaises(ValueError):
+            core.sab_compact(bad)
+
+    def test_descriptions(self):
+        d = core.load_descriptions(ROOT / "study_config.json")
+        self.assertEqual(d["SaGC"], "Commands given to different kinds of robots (e.g. a cooking or cleaning robot) "
+                                    "in a described scene. Judge the command for that robot in that scene.")
+        self.assertEqual(d["SafeAgentBench"], "Instructions for a household robot in a simulated home. The list shows "
+                                              "every object in the scene with its current state and location.")
+        # the AmbiK description names exactly the appliances the models get
+        appliances = [a.strip().split(" ", 1)[1] for a in core.AMBIK_APPLIANCES.split(",") if a.strip()]
+        for a in appliances:
+            self.assertIn(a, d["AmbiK"])
+        self.assertNotIn("stove", d["AmbiK"])
 
     @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
-    def test_identical_to_the_model_loaders(self):
+    def test_against_the_model_loaders(self):
         sys.path.insert(0, str(Path(os.environ["MVT_DIR"]) / "src"))
         from multivote_triage import datasets as D
         self.assertEqual(core.AMBIK_APPLIANCES, D.AMBIK_APPLIANCES)
@@ -233,8 +303,11 @@ class TestContext(unittest.TestCase):
             if ds == "SafeAgentBench":
                 continue
             key = f"sagc-{tid}" if ds == "SaGC" else "ambik-ambik_test_900-row_" + tid.split("_", 1)[1]
-            self.assertEqual(core.context_text(r, ds), models[key].workspace, tid)
             self.assertEqual(core.instruction_text(r, ds), models[key].instruction, tid)
+            if ds == "SaGC":
+                self.assertEqual(core.context_text(r, ds), models[key].workspace, tid)   # verbatim
+            else:   # models: appliance list + environment_full; shown: environment_short
+                self.assertEqual(models[key].workspace, core.AMBIK_APPLIANCES + r["environment_full"], tid)
             n += 1
         self.assertEqual(n, 598 + 472)
 
@@ -275,7 +348,7 @@ class TestTargets(unittest.TestCase):
 
 class TestTraining(unittest.TestCase):
     def test_version_and_ids(self):
-        self.assertEqual(VERSION, "t4")
+        self.assertEqual(VERSION, "t5")
         self.assertEqual(len({t["id"] for t in TRAINING}), len(TRAINING))
 
     def test_expected_answers_are_exact_option_strings(self):
@@ -318,17 +391,17 @@ class TestTraining(unittest.TestCase):
         ids = [t["source_id"] for t in TRAINING]
         self.assertEqual(ids[ids.index("AmbiK_413_ambiguous") + 1], "AmbiK_413_clear")
 
-    def test_models_context_and_no_instructions(self):
+    def test_shown_context_and_no_instructions(self):
         data = json.loads((ROOT / "training_tasks.json").read_text(encoding="utf-8"))
-        self.assertNotIn("instructions", data)                      # no standard-kitchen line (t4)
+        self.assertNotIn("instructions", data)                      # no standard-kitchen line
         self.assertNotIn("standard kitchen", json.dumps(data).lower())
         with open(ROOT / "ambik_test_900.csv", newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         for t in TRAINING:
             if t["dataset"] == "AmbiK":
                 row = int(re.match(r"AmbiK_(\d+)_", t["source_id"]).group(1))
-                self.assertEqual(t["environment_full"], rows[row]["environment_full"], t["id"])
-                self.assertNotIn("environment_short", t)
+                self.assertEqual(t["environment_short"], rows[row]["environment_short"], t["id"])
+                self.assertNotIn("environment_full", t)
             if t["dataset"] == "SafeAgentBench":
                 self.assertFalse({"step", "final_state", "objects", "involved_objects"} & set(t), t["id"])
 
