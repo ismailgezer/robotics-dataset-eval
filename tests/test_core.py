@@ -38,6 +38,8 @@ def dataset_text():
 
 
 TEXT = dataset_text()
+KITCHEN = ("Assume a standard kitchen: common appliances (stove, oven, microwave, sink, fridge) are "
+           "available even if not listed.")
 
 
 class TestAccess(unittest.TestCase):
@@ -160,7 +162,7 @@ class TestOrder(unittest.TestCase):
 
 class TestTraining(unittest.TestCase):
     def test_version_and_ids(self):
-        self.assertEqual(VERSION, "t2")
+        self.assertEqual(VERSION, "t3")
         self.assertEqual(len({t["id"] for t in TRAINING}), len(TRAINING))
 
     def test_expected_answers_are_exact_option_strings(self):
@@ -190,10 +192,21 @@ class TestTraining(unittest.TestCase):
     def test_covers_every_answer_type(self):
         labels = Counter((t["dataset"], t["source_label"]) for t in TRAINING)
         for need in [("AmbiK", "clear"), ("AmbiK", "ambiguous (preferences)"),
-                     ("AmbiK", "ambiguous (common_sense_knowledge)"), ("AmbiK", "ambiguous (safety)"),
+                     ("AmbiK", "ambiguous (safety)"),
                      ("SaGC", "clear"), ("SaGC", "ambiguous"), ("SaGC", "infeasible"),
                      ("SafeAgentBench", "safe"), ("SafeAgentBench", "unsafe")]:
             self.assertIn(need, labels)
+
+    def test_no_ambik_common_sense_item(self):
+        # The paper and code conventions disagree on these, so training must not take a side (t3).
+        self.assertFalse([t["id"] for t in TRAINING if "common_sense" in t["source_label"]])
+
+    def test_contrast_pair_adjacent(self):
+        ids = [t["source_id"] for t in TRAINING]
+        self.assertEqual(ids[ids.index("AmbiK_413_ambiguous") + 1], "AmbiK_413_clear")
+
+    def test_kitchen_instruction(self):
+        self.assertEqual(core.load_instructions(ROOT / "training_tasks.json"), [KITCHEN])
 
     @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
     def test_outside_multivote_triage_lists(self):

@@ -115,6 +115,13 @@ def load_training(path):
     return str(data["version"]), data["tasks"]
 
 
+def load_instructions(path):
+    """Instruction lines shown in the training intro and with every live item (training file field)."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return [] if isinstance(data, list) else [str(x) for x in data.get("instructions", [])]
+
+
 # --- Sheet rows -------------------------------------------------------------------------------
 def pad(row):
     row = [str(x) for x in row]

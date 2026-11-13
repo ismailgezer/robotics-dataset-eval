@@ -468,10 +468,16 @@ def answers_from_row(row):
 
 
 # --- Training / Calibration Session Module ---
-def render_training_module(sh, annotator_id, training_version, train_tasks):
+def render_instructions(instructions):
+    for line in instructions:
+        st.markdown(f"📌 {line}")
+
+
+def render_training_module(sh, annotator_id, training_version, train_tasks, instructions=()):
     """Calibration session with the same display and questions as the live evaluation."""
     st.info(
         "🎓 **Annotator Calibration Session**: Complete these benchmark tasks to align with evaluation standards before proceeding to live tasks.")
+    render_instructions(instructions)
 
     if 'train_idx' not in st.session_state:
         st.session_state.train_idx = 0
@@ -576,6 +582,7 @@ def main():
     try:
         subset, items = load_subset_items()
         training_version, train_tasks = core.load_training(TRAINING_FILE)
+        instructions = core.load_instructions(TRAINING_FILE)
     except Exception:
         log.exception("loading the task files failed")
         st.error("The task files could not be loaded. Please contact the study team.")
@@ -614,7 +621,7 @@ def main():
 
     # Routing: Calibration vs. Live Evaluation Queue
     if not st.session_state.is_trained:
-        render_training_module(sh, annotator_id, training_version, train_tasks)
+        render_training_module(sh, annotator_id, training_version, train_tasks, instructions)
         return
 
     order = st.session_state.order
@@ -646,6 +653,7 @@ def main():
     st.markdown(f"### Block {block} of {len(order)} · item {block_ids.index(task_id) + 1} of {len(block_ids)} "
                 f"({dataset_choice})")
     st.caption("You can stop at any time; your answers are saved and you continue where you left off.")
+    render_instructions(instructions)
 
     # Navigation Bar
     nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])

@@ -180,6 +180,15 @@ class TestSubmitBlocked(AppCase):
         self.assertFalse(at.button(key=f"check_btn_{t['id']}").disabled)
 
 
+class TestInstructions(AppCase):
+    def test_kitchen_rule_in_training_and_live_pages(self):
+        line = core.load_instructions(ROOT / "training_tasks.json")[0]
+        at = login(new_app(), "alice", "a-code")
+        self.assertTrue(any(line in m.value for m in at.markdown))       # training intro
+        do_training(self, at)
+        self.assertTrue(any(line in m.value for m in at.markdown))       # live item page
+
+
 class TestTrainingFeedback(AppCase):
     def test_expected_answers_match_for_every_item(self):
         do_training(self, login(new_app(), "alice", "a-code"))
