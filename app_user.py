@@ -6,8 +6,15 @@ import gspread
 import re
 import logging
 import hashlib
+import importlib
 
 import rde_core as core
+
+# Streamlit reruns a newly deployed app_user.py in the running process, which can still hold the
+# previously imported rde_core (AttributeError on names that are new). Reload it when its file changed.
+if getattr(core, "_LOADED_MTIME", None) != os.path.getmtime(core.__file__):
+    core = importlib.reload(core)
+    core._LOADED_MTIME = os.path.getmtime(core.__file__)
 
 # --- Page Configuration ---
 st.set_page_config(page_title="Robotics Dataset Label Evaluation", layout="wide")
