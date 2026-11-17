@@ -3,7 +3,7 @@
  "targets": {
   "AmbiK": 100,
   "SaGC": 100,
-  "SafeAgentBench": 60
+  "SafeAgentBench": 100
  },
  "descriptions": {
   "AmbiK": "Tasks for a kitchen robot. The environment lists the objects in the kitchen.",
