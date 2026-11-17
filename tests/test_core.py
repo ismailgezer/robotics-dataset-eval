@@ -169,6 +169,12 @@ class TestSubset(unittest.TestCase):
 
     def test_no_training_item_in_subset(self):
         ids = {it["id"] for it in self.items}
+        for t in TRAINING:   # neither the training ID nor its source is ever an evaluation item
+            self.assertNotIn(t["id"], ids, t["id"])
+            for name in ("alice", "jane doe"):
+                order = core.annotator_order(SUBSET, name)
+                shown = {tid for ds in core.DATASETS for _, tid in core.flat_order(order, ds)}
+                self.assertFalse({t["id"], t["source_id"]} & shown, t["id"])
         rows = {it.get("row") for it in self.items if it["dataset"] == "AmbiK"}
         for t in TRAINING:
             self.assertNotIn(t["source_id"], ids, t["id"])
@@ -357,7 +363,9 @@ class TestContext(unittest.TestCase):
     def test_descriptions(self):
         d = core.load_descriptions(ROOT / "study_config.json")
         self.assertEqual(d["SaGC"], "Commands given to different kinds of robots (e.g. a cooking or cleaning robot) "
-                                    "in a described scene. Judge the command for that robot in that scene.")
+                                    "in a described scene. Judge the command for that robot in that scene. "
+                                    "A task the given robot type cannot perform is infeasible. "   # t7, Amendment 17
+                                    "For example, a cleaning robot cannot do tasks other than cleaning.")
         self.assertEqual(d["AmbiK"], "Tasks for a kitchen robot. The environment lists the objects in the kitchen.")
         self.assertIn("objects the instruction mentions", d["SafeAgentBench"])
         for a in ("fridge", "oven", "microwave", "dishwasher", "kettle", "stove"):   # appliances are per item now
@@ -443,8 +451,25 @@ class TestTargets(unittest.TestCase):
 
 class TestTraining(unittest.TestCase):
     def test_version_and_ids(self):
-        self.assertEqual(VERSION, "t6")
+        self.assertEqual(VERSION, "t7")
+        self.assertEqual(len(TRAINING), 10)
         self.assertEqual(len({t["id"] for t in TRAINING}), len(TRAINING))
+        self.assertEqual([t["id"] for t in TRAINING][3:5], ["TRAIN_AMBIK_5_AMBIGUOUS", "TRAIN_AMBIK_5_NOGLASS"])
+
+    def test_modified_variant(self):
+        # t7: a training-only variant of item 4, identical except that 'glass plate' is removed from the
+        # environment. It is not a dataset item and carries no dataset label.
+        by_id = {t["id"]: t for t in TRAINING}
+        modified = [t["id"] for t in TRAINING if "modified" in t]
+        self.assertEqual(modified, ["TRAIN_AMBIK_5_NOGLASS"])
+        v, src = by_id["TRAIN_AMBIK_5_NOGLASS"], by_id["TRAIN_AMBIK_5_AMBIGUOUS"]
+        self.assertIs(v["modified"]["synthetic"], True)
+        self.assertEqual(v["modified"]["from"], src["id"])
+        self.assertTrue(v["source_label"].startswith("none"))
+        self.assertEqual(src["environment_short"].split(", "), v["environment_short"].split(", ") + ["glass plate"])
+        self.assertEqual(v["instruction"], src["instruction"])
+        self.assertEqual((v["dataset"], v["source_id"]), (src["dataset"], src["source_id"]))
+        # expected answers and explanation are set separately for the variant and are not compared
 
     def test_expected_answers_are_exact_option_strings(self):
         for t in TRAINING:
@@ -485,6 +510,7 @@ class TestTraining(unittest.TestCase):
     def test_contrast_pair_adjacent(self):
         ids = [t["source_id"] for t in TRAINING]
         self.assertEqual(ids[ids.index("AmbiK_413_ambiguous") + 1], "AmbiK_413_clear")
+        self.assertEqual(ids[ids.index("AmbiK_5_ambiguous") + 1], "AmbiK_5_ambiguous")   # item 4, then its variant
 
     def test_shown_context_and_no_instructions(self):
         data = json.loads((ROOT / "training_tasks.json").read_text(encoding="utf-8"))
@@ -495,10 +521,28 @@ class TestTraining(unittest.TestCase):
         for t in TRAINING:
             if t["dataset"] == "AmbiK":
                 row = int(re.match(r"AmbiK_(\d+)_", t["source_id"]).group(1))
-                self.assertEqual(t["environment_short"], rows[row]["environment_short"], t["id"])
+                env = rows[row]["environment_short"]
+                if "modified" in t:   # the training-only variant (test_modified_variant)
+                    env = env.replace(", glass plate", "")
+                self.assertEqual(t["environment_short"], env, t["id"])
                 self.assertNotIn("environment_full", t)
             if t["dataset"] == "SafeAgentBench":
                 self.assertFalse({"step", "final_state", "objects", "involved_objects"} & set(t), t["id"])
+
+    @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
+    def test_importer_never_outputs_a_training_item(self):
+        # Training answers are not written to the Sheet (only the training-complete marker); even if a
+        # row with a training ID were there, the multivote-triage importer must report it as unmatched.
+        sys.path.insert(0, str(Path(os.environ["MVT_DIR"]) / "src"))
+        from multivote_triage import human_labels as H
+        rows = [{"sheet_row": n + 2, "Annotator_ID": "alice", "Dataset": t["dataset"], "Task_ID": tid,
+                 "Instruction": "", "Clarity": t["expected_clarity"], "Feasibility": t["expected_feasibility"],
+                 "Safety": t["expected_safety"], "Interface_Version": "v2", "Training_Version": VERSION}
+                for n, (t, tid) in enumerate((t, tid) for t in TRAINING for tid in (t["id"], t["id"].lower()))]
+        rows.append({"sheet_row": 99, "Annotator_ID": "alice", "Dataset": core.TRAINING_MARKER, "Task_ID": "PASSED",
+                     "Interface_Version": "v2", "Training_Version": VERSION})
+        out, report = H.convert(rows, interface_version="v2")
+        self.assertEqual(out, [])
 
     @unittest.skipUnless(os.environ.get("MVT_DIR"), "set MVT_DIR to a multivote-triage checkout")
     def test_outside_multivote_triage_lists(self):
