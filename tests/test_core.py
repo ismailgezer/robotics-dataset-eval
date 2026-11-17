@@ -387,7 +387,7 @@ class TestTargets(unittest.TestCase):
     targets = core.load_targets(ROOT / "study_config.json")
 
     def test_values(self):
-        self.assertEqual(self.targets, {"AmbiK": 100, "SaGC": 100, "SafeAgentBench": 60})
+        self.assertEqual(self.targets, {"AmbiK": 100, "SaGC": 100, "SafeAgentBench": 100})
 
     def test_target_ends_on_a_block_boundary(self):
         for ds, target in self.targets.items():
@@ -407,6 +407,30 @@ class TestTargets(unittest.TestCase):
             got = Counter(it["stratum"] for it in its if it["id"] in first)
             for stratum, n in total.items():
                 self.assertLess(abs(got[stratum] - target * n / len(its)), 1, (ds, stratum, got[stratum]))
+
+    # The first 60 SafeAgentBench items of each annotator as computed on main at c6318d3 (target 60,
+    # subset s2). The target was raised to 100 on 2026-11-17; annotators who already finished 60 continue
+    # on the same order, so these must stay a prefix of the first 100.
+    SAB_FIRST_60_ON_MAIN = {
+        "alice": [473, 227, 480, 70, 127, 318, 178, 288, 245, 564, 422, 361, 497, 371, 359, 399, 469, 470, 16, 531,
+                  133, 375, 468, 328, 61, 59, 259, 407, 447, 45, 526, 528, 570, 183, 294, 165, 197, 429, 134, 278,
+                  415, 107, 580, 33, 479, 170, 9, 111, 57, 173, 35, 355, 313, 490, 240, 411, 77, 186, 307, 394],
+        "jane doe": [245, 371, 70, 16, 318, 361, 564, 480, 470, 359, 288, 531, 473, 497, 227, 422, 399, 469, 178, 127,
+                     59, 570, 407, 183, 197, 165, 447, 528, 259, 134, 61, 328, 375, 278, 294, 526, 429, 133, 45, 468,
+                     107, 490, 186, 355, 394, 240, 415, 77, 411, 111, 313, 479, 173, 9, 33, 170, 580, 57, 307, 35],
+        "annotator7": [371, 361, 531, 359, 473, 245, 422, 227, 178, 480, 16, 470, 318, 399, 564, 469, 497, 127, 70, 288,
+                       294, 197, 429, 526, 45, 468, 165, 259, 375, 59, 133, 134, 183, 407, 61, 447, 570, 528, 328, 278,
+                       107, 77, 580, 9, 415, 173, 111, 313, 490, 240, 186, 479, 35, 57, 355, 307, 33, 170, 411, 394],
+    }
+
+    def test_safeagentbench_first_60_unchanged_from_main(self):
+        target = self.targets["SafeAgentBench"]
+        self.assertGreaterEqual(target, 60)
+        for name, expected in self.SAB_FIRST_60_ON_MAIN.items():
+            flat = [t for _, t in core.flat_order(core.annotator_order(SUBSET, core.normalize_id(name)),
+                                                    "SafeAgentBench")]
+            self.assertEqual(flat[:60], [f"SafeAgentBench_{i}" for i in expected], name)
+            self.assertEqual(len(flat[:target]), target, name)
 
     def test_progress_and_next_open(self):
         flat = [(1, "a"), (1, "b"), (2, "c"), (2, "d")]
