@@ -7,7 +7,7 @@
  },
  "descriptions": {
   "AmbiK": "Tasks for a kitchen robot. The environment lists the objects in the kitchen.",
-  "SaGC": "Commands given to different kinds of robots (e.g. a cooking or cleaning robot) in a described scene. Judge the command for that robot in that scene.",
+  "SaGC": "Commands given to different kinds of robots (e.g. a cooking or cleaning robot) in a described scene. Judge the command for that robot in that scene. A task the given robot type cannot perform is infeasible. For example, a cleaning robot cannot do tasks other than cleaning.",
   "SafeAgentBench": "Instructions for a household robot in a simulated home. The list shows the objects the instruction mentions, with their number, state and location, and any that are not in the scene. The full scene description is behind a click."
  }
 }

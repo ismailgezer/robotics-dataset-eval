@@ -325,6 +325,28 @@ class TestContext(AppCase):
             at.button(key=f"next_train_btn_{t['id']}").click().run()
 
 
+    def test_sagc_robot_type_note_in_both_blue_boxes(self):
+        # t7: the SaGC description carries the robot-type note (wording of SAGC_CLASSIFY_V2, Amendment 17).
+        # Training and dataset selection read the same description from study_config.json.
+        note = ("A task the given robot type cannot perform is infeasible. "
+                "For example, a cleaning robot cannot do tasks other than cleaning.")
+        self.assertIn(note, DESCRIPTIONS["SaGC"])
+        box = f"**SaGC:** {DESCRIPTIONS['SaGC']}"
+        at = login(new_app(), "alice")
+        for t in TRAINING:
+            self.assertEqual(box in texts(at.info), t["id"] == "TRAIN_SAGC_676", t["id"])   # first SaGC item only
+            self.assertEqual(any(note in m.value for m in at.markdown), False, t["id"])     # never on the item
+            answer(at, f"train_{t['id']}", expected(t))
+            at.button(key=f"check_btn_{t['id']}").click().run()
+            at.button(key=f"next_train_btn_{t['id']}").click().run()
+        at.button(key="proceed_live").click().run()
+        at.radio(key="dataset_choice").set_value("SaGC").run()
+        self.assertIn(box, texts(at.info))                                                  # dataset selection
+        self.assertFalse(any(note in m.value for m in at.markdown))
+        submit_current(at)
+        self.assertNotIn(note, page_text(at))                                               # gone after the first answer
+
+
 class TestTrainingFeedback(AppCase):
     def test_expected_answers_match_for_every_item(self):
         do_training(self, login(new_app(), "alice"))
